@@ -18,6 +18,11 @@ dependencies = [
   "sounddevice>=0.5",
 ]
 
+[project.urls]
+Homepage = "https://github.com/russmsft/harbor-voice"
+Repository = "https://github.com/russmsft/harbor-voice.git"
+Issues = "https://github.com/russmsft/harbor-voice/issues"
+
 [project.scripts]
 harbor-voice = "harbor_voice.app:main"
 harbor-voice-doctor = "harbor_voice.diagnostics:main"
