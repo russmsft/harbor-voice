@@ -117,6 +117,7 @@ class SettingsDialog(QDialog):
     ) -> None:
         super().__init__(parent)
         current = settings or AssistantSettings()
+        self._current = current
         self.setWindowTitle("Harbor Voice settings")
         layout = QFormLayout(self)
         self.workspace_edit = QLineEdit(str(current.workspace or ""))
@@ -141,16 +142,17 @@ class SettingsDialog(QDialog):
     def _save(self) -> None:
         workspace_text = self.workspace_edit.text().strip()
         try:
-            settings = AssistantSettings(
+            values = self._current.model_dump()
+            values.update(
                 workspace=Path(workspace_text) if workspace_text else None,
                 ptt_key=self.ptt_edit.text().strip(),
                 retention=self.retention_combo.currentData(),
                 launch_at_login=self.launch_checkbox.isChecked(),
             )
+            settings = AssistantSettings.model_validate(values)
         except ValidationError as exc:
             self.error_label.setText(str(exc.errors()[0]["msg"]))
             return
         self.error_label.clear()
         self.saved.emit(settings)
         self.accept()
-

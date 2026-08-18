@@ -8,6 +8,7 @@ from PySide6.QtCore import Qt
 from pytestqt.qtbot import QtBot
 
 from harbor_voice.domain import ActionKind, ActionProposal, AppState
+from harbor_voice.storage import AssistantSettings
 from harbor_voice.ui.tray import SingleInstanceGuard, TrayController
 from harbor_voice.ui.window import ApprovalDialog, ConversationWindow, SettingsDialog
 
@@ -96,6 +97,38 @@ def test_settings_dialog_rejects_missing_workspace(qtbot: QtBot, tmp_path: Path)
     qtbot.mouseClick(dialog.save_button, Qt.MouseButton.LeftButton)
 
     assert "workspace must exist" in dialog.error_label.text().casefold()
+
+
+def test_settings_dialog_preserves_settings_it_does_not_edit(
+    qtbot: QtBot, tmp_path: Path
+) -> None:
+    executable = tmp_path / "notepad.exe"
+    current = AssistantSettings(
+        workspace=tmp_path,
+        microphone_device=3,
+        voice_id="voice-id",
+        stt_model="small.en",
+        stt_device="cpu",
+        stt_compute_type="float32",
+        registered_apps={"Notepad": executable},
+    )
+    dialog = SettingsDialog(current)
+    qtbot.addWidget(dialog)
+    received: list[AssistantSettings] = []
+    dialog.saved.connect(received.append)
+
+    dialog.ptt_edit.setText("f10")
+    qtbot.mouseClick(dialog.save_button, Qt.MouseButton.LeftButton)
+
+    assert len(received) == 1
+    saved = received[0]
+    assert saved.ptt_key == "f10"
+    assert saved.microphone_device == 3
+    assert saved.voice_id == "voice-id"
+    assert saved.stt_model == "small.en"
+    assert saved.stt_device == "cpu"
+    assert saved.stt_compute_type == "float32"
+    assert saved.registered_apps == {"Notepad": executable}
 
 
 def test_single_instance_lock_allows_only_one_owner(tmp_path: Path) -> None:
