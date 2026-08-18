@@ -13,6 +13,8 @@ def proposal(
     *,
     payload: dict[str, str] | None = None,
 ) -> ActionProposal:
+    if payload is None and kind is ActionKind.FILE_WRITE:
+        payload = {"content": "updated"}
     return ActionProposal(
         id=UUID("ce580958-f241-4133-bf5e-8dcfb70b3729"),
         kind=kind,
@@ -59,6 +61,32 @@ def test_relative_escape_is_blocked(tmp_path: Path) -> None:
 def test_nonexistent_workspace_is_rejected(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="workspace must exist"):
         PermissionPolicy(tmp_path / "missing", registered_apps={})
+
+
+def test_file_write_requires_complete_bounded_content(tmp_path: Path) -> None:
+    policy = PermissionPolicy(tmp_path, registered_apps={}, max_file_chars=5)
+
+    missing = policy.evaluate(
+        proposal(ActionKind.FILE_WRITE, "note.txt", payload={}),
+        now=100,
+    )
+    oversized = policy.evaluate(
+        proposal(ActionKind.FILE_WRITE, "note.txt", payload={"content": "123456"}),
+        now=100,
+    )
+
+    assert missing.reason == "file_content_missing"
+    assert oversized.reason == "file_content_too_large"
+
+
+def test_file_write_cannot_create_unapproved_parent_directories(tmp_path: Path) -> None:
+    decision = PermissionPolicy(tmp_path, {}).evaluate(
+        proposal(ActionKind.FILE_WRITE, "new/sub/note.txt"),
+        now=100,
+    )
+
+    assert decision.disposition is Disposition.BLOCK
+    assert decision.reason == "file_parent_missing"
 
 
 @pytest.mark.parametrize(
@@ -154,4 +182,3 @@ def test_backwards_clock_invalidates_approval(tmp_path: Path) -> None:
 
     assert decision.disposition is Disposition.BLOCK
     assert decision.reason == "clock_changed"
-

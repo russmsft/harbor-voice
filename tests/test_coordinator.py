@@ -1,12 +1,13 @@
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass
 from pathlib import Path
 from uuid import UUID, uuid4
 
 import pytest
 
-from harbor_voice.coordinator import ApprovalExpired, ApprovalNotFound, TurnCoordinator
+from harbor_voice.coordinator import ApprovalExpired, ApprovalNotFound, TurnBusy, TurnCoordinator
 from harbor_voice.domain import (
     ActionKind,
     ActionProposal,
@@ -185,6 +186,29 @@ async def test_new_turn_cancels_speech_before_transcription(rig: Rig) -> None:
     await rig.coordinator.submit(sample_recording())
 
     assert rig.events.index("speaker.cancel") < rig.events.index("transcriber.transcribe")
+
+
+@pytest.mark.asyncio
+async def test_overlapping_turn_is_rejected_without_replacing_state(rig: Rig) -> None:
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def transcribe(recording):
+        del recording
+        started.set()
+        await release.wait()
+        return Transcript("first")
+
+    rig.coordinator._transcriber.transcribe = transcribe
+    first = asyncio.create_task(rig.coordinator.submit(sample_recording()))
+    await started.wait()
+
+    with pytest.raises(TurnBusy):
+        await rig.coordinator.submit(sample_recording())
+
+    release.set()
+    await first
+    assert len(rig.backend.requests) == 1
 
 
 @pytest.mark.asyncio

@@ -53,6 +53,7 @@ class AppPaths:
     history: Path
     log_dir: Path
     models: Path
+    marker: Path
 
     @classmethod
     def from_root(cls, root: Path) -> AppPaths:
@@ -63,7 +64,12 @@ class AppPaths:
             history=resolved / "history.jsonl",
             log_dir=resolved / "logs",
             models=resolved / "models",
+            marker=resolved / ".harbor-voice-data",
         )
+
+    def ensure_owned_root(self) -> None:
+        self.root.mkdir(parents=True, exist_ok=True)
+        self.marker.touch(exist_ok=True)
 
 
 class SettingsStore:

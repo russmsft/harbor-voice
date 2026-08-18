@@ -59,6 +59,7 @@ def file_write(target: Path) -> ActionProposal:
         kind=ActionKind.FILE_WRITE,
         target=str(target),
         summary="Update the requested note",
+        payload={"content": "Updated content.\n"},
     )
 
 
@@ -116,21 +117,23 @@ async def test_invalid_structured_output_cannot_become_action(tmp_path: Path) ->
 
 
 @pytest.mark.asyncio
-async def test_approved_file_change_uses_workspace_write(tmp_path: Path) -> None:
+async def test_approved_file_change_writes_only_the_exact_target(tmp_path: Path) -> None:
     fake = FakeCodex()
     fake.thread.final_response = "Updated the note."
     backend = CodexBackend(codex_factory=lambda: fake)
     await backend.start(tmp_path)
     target = tmp_path / "note.txt"
+    untouched = tmp_path / "untouched.txt"
+    untouched.write_text("keep", encoding="utf-8")
 
     result = await backend.apply_workspace_change(file_write(target))
 
-    call = fake.thread.run_calls[-1]
-    assert call.kwargs["sandbox"] is Sandbox.workspace_write
-    assert call.kwargs["approval_mode"] is ApprovalMode.deny_all
-    assert str(target.resolve()) in call.prompt
+    assert fake.thread.run_calls == []
+    assert target.read_text(encoding="utf-8") == "Updated content.\n"
+    assert untouched.read_text(encoding="utf-8") == "keep"
+    assert list(tmp_path.glob(".*.tmp")) == []
     assert result.success is True
-    assert result.message == "Updated the note."
+    assert result.message == "Updated note.txt."
 
 
 @pytest.mark.asyncio
@@ -163,6 +166,19 @@ async def test_outside_file_target_cannot_request_workspace_write(tmp_path: Path
 
 
 @pytest.mark.asyncio
+async def test_file_change_does_not_create_parent_directories(tmp_path: Path) -> None:
+    fake = FakeCodex()
+    backend = CodexBackend(codex_factory=lambda: fake)
+    await backend.start(tmp_path)
+    target = tmp_path / "new" / "sub" / "note.txt"
+
+    with pytest.raises(PermissionError, match="parent directory"):
+        await backend.apply_workspace_change(file_write(target))
+
+    assert not (tmp_path / "new").exists()
+
+
+@pytest.mark.asyncio
 async def test_reset_starts_a_fresh_read_only_thread(tmp_path: Path) -> None:
     fake = FakeCodex()
     backend = CodexBackend(codex_factory=lambda: fake)
@@ -184,4 +200,3 @@ async def test_close_releases_sdk_context_once(tmp_path: Path) -> None:
     await backend.close()
 
     assert fake.exit_calls == 1
-

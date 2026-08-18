@@ -9,7 +9,7 @@ import pytest_asyncio
 from PySide6.QtWidgets import QApplication
 
 from harbor_voice.app import HarborRuntime, ProviderBundle, build_components
-from harbor_voice.domain import ActionResult, AudioRecording, MessageResponse, Transcript
+from harbor_voice.domain import ActionResult, AppState, AudioRecording, MessageResponse, Transcript
 from harbor_voice.storage import (
     AppPaths,
     AssistantSettings,
@@ -144,6 +144,27 @@ async def test_push_to_talk_cancels_speech_before_recording(runtime_rig: Runtime
 
 
 @pytest.mark.asyncio
+async def test_mute_toggle_does_not_disable_speech_interruption(runtime_rig: RuntimeRig) -> None:
+    release = asyncio.Event()
+
+    async def speaking():
+        await release.wait()
+
+    active = runtime_rig.runtime._start_operation(speaking())
+    await asyncio.sleep(0)
+    runtime_rig.runtime.graph.coordinator._state = AppState.SPEAKING
+    runtime_rig.runtime._set_state(AppState.SPEAKING)
+
+    runtime_rig.runtime._toggle_mute()
+    runtime_rig.runtime._toggle_mute()
+    runtime_rig.runtime.handle_press()
+    await asyncio.sleep(0)
+
+    assert runtime_rig.recorder.start_calls == 1
+    assert active.cancelled()
+
+
+@pytest.mark.asyncio
 async def test_release_submits_recording_and_updates_window(runtime_rig: RuntimeRig) -> None:
     runtime_rig.runtime.handle_press()
 
@@ -153,6 +174,29 @@ async def test_release_submits_recording_and_updates_window(runtime_rig: Runtime
     assert runtime_rig.backend.requests[0].text == "hello"
     assert runtime_rig.runtime.window.transcript_text.toPlainText() == "hello"
     assert runtime_rig.runtime.window.response_text.toPlainText() == "A safe response."
+
+
+@pytest.mark.asyncio
+async def test_press_is_ignored_while_turn_is_still_processing(runtime_rig: RuntimeRig) -> None:
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def transcribe(recording):
+        del recording
+        started.set()
+        await release.wait()
+        return Transcript("hello")
+
+    runtime_rig.runtime.graph.coordinator._transcriber.transcribe = transcribe
+    runtime_rig.runtime.handle_press()
+    first = runtime_rig.runtime.handle_release()
+    await started.wait()
+
+    runtime_rig.runtime.handle_press()
+
+    assert runtime_rig.recorder.start_calls == 1
+    release.set()
+    await first
 
 
 @pytest.mark.asyncio

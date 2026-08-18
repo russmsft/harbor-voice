@@ -109,6 +109,15 @@ def test_app_paths_keep_data_below_selected_root(tmp_path: Path) -> None:
     assert paths.history == tmp_path / "history.jsonl"
     assert paths.log_dir == tmp_path / "logs"
     assert paths.models == tmp_path / "models"
+    assert paths.marker == tmp_path / ".harbor-voice-data"
+
+
+def test_app_data_root_has_uninstall_ownership_marker(tmp_path: Path) -> None:
+    paths = AppPaths.from_root(tmp_path / "data")
+
+    paths.ensure_owned_root()
+
+    assert paths.marker.is_file()
 
 
 def test_configured_log_omits_sensitive_extra_fields(tmp_path: Path) -> None:

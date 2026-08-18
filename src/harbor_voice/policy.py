@@ -33,6 +33,7 @@ class PermissionPolicy:
         *,
         approval_ttl_seconds: float = 300.0,
         max_clipboard_chars: int = 100_000,
+        max_file_chars: int = 1_000_000,
     ) -> None:
         resolved_workspace = workspace.expanduser().resolve(strict=False)
         if not resolved_workspace.is_dir():
@@ -44,13 +45,14 @@ class PermissionPolicy:
         }
         self.approval_ttl_seconds = approval_ttl_seconds
         self.max_clipboard_chars = max_clipboard_chars
+        self.max_file_chars = max_file_chars
 
     def evaluate(self, action: ActionProposal, now: float) -> PolicyDecision:
         """Return the permission decision for an action at the current instant."""
         del now
         match action.kind:
             case ActionKind.FILE_WRITE:
-                return self._file_write(action.target)
+                return self._file_write(action)
             case ActionKind.OPEN_APP:
                 return self._open_app(action.target)
             case ActionKind.OPEN_URL:
@@ -76,13 +78,22 @@ class PermissionPolicy:
             return PolicyDecision(Disposition.BLOCK, "approval_expired")
         return self.evaluate(action, now)
 
-    def _file_write(self, target_text: str) -> PolicyDecision:
-        candidate = Path(target_text).expanduser()
+    def _file_write(self, action: ActionProposal) -> PolicyDecision:
+        candidate = Path(action.target).expanduser()
         if not candidate.is_absolute():
             candidate = self.workspace / candidate
         target = candidate.resolve(strict=False)
         if target != self.workspace and not target.is_relative_to(self.workspace):
             return PolicyDecision(Disposition.BLOCK, "outside_workspace", str(target))
+        if target.is_dir():
+            return PolicyDecision(Disposition.BLOCK, "file_target_is_directory", str(target))
+        if not target.parent.is_dir():
+            return PolicyDecision(Disposition.BLOCK, "file_parent_missing", str(target))
+        content = action.payload.get("content")
+        if content is None:
+            return PolicyDecision(Disposition.BLOCK, "file_content_missing", str(target))
+        if len(content) > self.max_file_chars:
+            return PolicyDecision(Disposition.BLOCK, "file_content_too_large", str(target))
         return PolicyDecision(Disposition.CONFIRM, "confirmation_required", str(target))
 
     def _open_app(self, app_name: str) -> PolicyDecision:

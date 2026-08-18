@@ -92,3 +92,18 @@ async def test_speaker_can_be_reused_after_cancellation() -> None:
     await speaker.close()
 
     assert engine.completed == ["Fresh response."]
+
+
+@pytest.mark.asyncio
+async def test_engine_initialization_failure_is_reported() -> None:
+    def fail():
+        raise RuntimeError("SAPI unavailable")
+
+    speaker = SapiSpeaker(engine_factory=fail)
+
+    with pytest.raises(RuntimeError, match="failed to initialize") as exc_info:
+        await asyncio.wait_for(speaker.speak("Hello."), timeout=1)
+    await speaker.close()
+
+    assert isinstance(exc_info.value.__cause__, RuntimeError)
+    assert str(exc_info.value.__cause__) == "SAPI unavailable"

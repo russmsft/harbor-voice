@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Callable
 from dataclasses import dataclass
 from time import monotonic
@@ -26,6 +27,10 @@ class ApprovalNotFound(LookupError):
 
 class ApprovalExpired(PermissionError):
     """The pending action is no longer eligible for execution."""
+
+
+class TurnBusy(RuntimeError):
+    """Another turn or approved action is still in progress."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -55,6 +60,7 @@ class TurnCoordinator:
         self._state_sink = state_sink
         self._history_sink = history_sink or (lambda role, text: None)
         self._clock = clock
+        self._turn_lock = asyncio.Lock()
         self._pending: PendingApproval | None = None
         self._state = AppState.IDLE
         self.last_error: str | None = None
@@ -71,6 +77,12 @@ class TurnCoordinator:
 
     async def submit(self, recording: AudioRecording) -> None:
         """Transcribe and process one in-memory recording."""
+        if self._turn_lock.locked() or self._pending is not None:
+            raise TurnBusy("another turn or approval is already active")
+        async with self._turn_lock:
+            await self._submit(recording)
+
+    async def _submit(self, recording: AudioRecording) -> None:
         self._speaker.cancel()
         self.last_error = None
         self.last_transcript = ""
@@ -96,25 +108,26 @@ class TurnCoordinator:
 
     async def approve(self, action_id: UUID) -> None:
         """Execute the matching pending action at most once."""
-        pending = self._pending
-        if pending is None or pending.action.id != action_id:
-            raise ApprovalNotFound(str(action_id))
+        async with self._turn_lock:
+            pending = self._pending
+            if pending is None or pending.action.id != action_id:
+                raise ApprovalNotFound(str(action_id))
 
-        decision = self._policy.revalidate(
-            pending.action,
-            approved_at=pending.created_at,
-            now=self._clock(),
-        )
-        if decision.disposition is not Disposition.CONFIRM:
+            decision = self._policy.revalidate(
+                pending.action,
+                approved_at=pending.created_at,
+                now=self._clock(),
+            )
+            if decision.disposition is not Disposition.CONFIRM:
+                self._pending = None
+                self._publish(AppState.IDLE)
+                raise ApprovalExpired(decision.reason)
+
             self._pending = None
-            self._publish(AppState.IDLE)
-            raise ApprovalExpired(decision.reason)
-
-        self._pending = None
-        try:
-            await self._execute(pending.action)
-        except Exception as exc:
-            self._fail(exc)
+            try:
+                await self._execute(pending.action)
+            except Exception as exc:
+                self._fail(exc)
 
     def reject(self, action_id: UUID) -> None:
         pending = self._pending
@@ -127,13 +140,14 @@ class TurnCoordinator:
         self._speaker.cancel()
 
     async def new_conversation(self) -> None:
-        self._speaker.cancel()
-        self._pending = None
-        self.last_error = None
-        self.last_transcript = ""
-        self.last_response = ""
-        await self._backend.reset()
-        self._publish(AppState.IDLE)
+        async with self._turn_lock:
+            self._speaker.cancel()
+            self._pending = None
+            self.last_error = None
+            self.last_transcript = ""
+            self.last_response = ""
+            await self._backend.reset()
+            self._publish(AppState.IDLE)
 
     def recover(self) -> None:
         self.last_error = None

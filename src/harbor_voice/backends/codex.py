@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import os
+import tempfile
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -25,7 +27,9 @@ Return a message for information and read-only work. Return a proposal when the 
 explicitly asks to write a file, open an application, open an HTTPS URL, read the
 clipboard, or replace clipboard text. Never claim an action has happened when you
 are only proposing it. Never propose deletion, credentials, arbitrary shell access,
-or work outside the current folder.
+or work outside the current folder. A file_write proposal must include the complete
+final UTF-8 file text in action.payload.content. The application, not you, performs
+that exact single-file write after approval.
 """
 
 ASSISTANT_RESPONSE_SCHEMA = TypeAdapter(AssistantResponse).json_schema()
@@ -71,6 +75,9 @@ class CodexBackend:
     async def apply_workspace_change(self, action: ActionProposal) -> ActionResult:
         if action.kind is not ActionKind.FILE_WRITE:
             raise ValueError("workspace-write is restricted to an approved file-write action")
+        content = action.payload.get("content")
+        if content is None:
+            raise ValueError("workspace-write requires complete file content")
         workspace = self._require_workspace()
         candidate = Path(action.target).expanduser()
         if not candidate.is_absolute():
@@ -78,20 +85,35 @@ class CodexBackend:
         target = candidate.resolve(strict=False)
         if target != workspace and not target.is_relative_to(workspace):
             raise PermissionError("file target is outside workspace")
-        prompt = (
-            "Execute only this user-approved file change. "
-            f"Approval ID: {action.id}. Target: {target}. "
-            f"Approved effect: {action.summary}. "
-            "Do not edit any other path and do not perform unrelated work. "
-            "Report the result in one short spoken sentence."
+        if target.is_dir():
+            raise PermissionError("file target is a directory")
+        if not target.parent.is_dir():
+            raise PermissionError("file target parent directory does not exist")
+
+        temporary: Path | None = None
+        try:
+            with tempfile.NamedTemporaryFile(
+                mode="w",
+                encoding="utf-8",
+                newline="\n",
+                prefix=f".{target.name}.",
+                suffix=".tmp",
+                dir=target.parent,
+                delete=False,
+            ) as handle:
+                temporary = Path(handle.name)
+                handle.write(content)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temporary, target)
+        finally:
+            if temporary is not None:
+                temporary.unlink(missing_ok=True)
+        return ActionResult(
+            success=True,
+            message=f"Updated {target.name}.",
+            details={"target": str(target)},
         )
-        result = await self._require_thread().run(
-            prompt,
-            sandbox=Sandbox.workspace_write,
-            approval_mode=ApprovalMode.deny_all,
-        )
-        message = (result.final_response or "The approved file change completed.").strip()
-        return ActionResult(success=True, message=message, details={"target": str(target)})
 
     async def reset(self) -> None:
         self._require_workspace()
@@ -124,4 +146,3 @@ class CodexBackend:
         if self.workspace is None:
             raise RuntimeError("Codex backend is not started")
         return self.workspace
-

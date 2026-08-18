@@ -4,9 +4,10 @@ from __future__ import annotations
 
 import asyncio
 import sys
+from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Coroutine
 
 import qasync
 from platformdirs import user_data_path
@@ -157,6 +158,9 @@ class HarborRuntime:
             lambda _: self._bridge.released.emit(),
         )
         self._approval_dialog: ApprovalDialog | None = None
+        self._operation_task: asyncio.Task[None] | None = None
+        self._recording = False
+        self._operation_state = AppState.IDLE
         self._muted = False
         self._started = False
         self._closed = False
@@ -173,23 +177,31 @@ class HarborRuntime:
         return True
 
     def handle_press(self) -> None:
-        if self._muted:
+        if self._muted or self._recording:
+            return
+        active = self._operation_task
+        if active is not None and not active.done():
+            if self.graph.coordinator.state is not AppState.SPEAKING:
+                return
+            active.cancel()
+        elif self._operation_state not in {AppState.IDLE, AppState.ERROR}:
             return
         self.graph.coordinator.cancel_speech()
         self.providers.recorder.start()
+        self._recording = True
         self._set_state(AppState.LISTENING)
 
     def handle_release(self) -> asyncio.Task[None]:
-        recording = self.providers.recorder.stop()
         loop = self._running_loop()
+        if not self._recording:
+            return loop.create_task(self._nothing())
+        self._recording = False
+        recording = self.providers.recorder.stop()
         if recording is None:
             self._set_state(AppState.IDLE)
-
-            async def nothing() -> None:
-                return None
-
-            return loop.create_task(nothing())
-        return loop.create_task(self._submit(recording))
+            return loop.create_task(self._nothing())
+        previous = self._operation_task
+        return self._start_operation(self._submit_after(previous, recording))
 
     async def shutdown(self) -> None:
         if self._closed:
@@ -197,6 +209,11 @@ class HarborRuntime:
         self._closed = True
         self._hotkey.stop()
         self.providers.recorder.close()
+        active = self._operation_task
+        if active is not None and not active.done():
+            active.cancel()
+            with suppress(asyncio.CancelledError):
+                await active
         await self.providers.speaker.close()
         await self.providers.backend.close()
         self.tray.hide()
@@ -219,8 +236,8 @@ class HarborRuntime:
             )
 
     def _set_state(self, state: AppState) -> None:
-        self.tray.set_state(state)
-        self.window.set_state(state)
+        self._operation_state = state
+        self._render_state()
         if state is AppState.APPROVAL and self.graph.coordinator.pending is not None:
             self._show_approval()
 
@@ -236,7 +253,7 @@ class HarborRuntime:
         dialog.raise_()
 
     def _approve(self, action_id) -> None:
-        self._running_loop().create_task(self.graph.coordinator.approve(action_id))
+        self._start_operation(self.graph.coordinator.approve(action_id))
 
     def _reject(self, action_id) -> None:
         self.graph.coordinator.reject(action_id)
@@ -257,7 +274,7 @@ class HarborRuntime:
 
     def _toggle_mute(self) -> None:
         self._muted = not self._muted
-        self._set_state(AppState.MUTED if self._muted else AppState.IDLE)
+        self._render_state()
 
     def _show_settings(self) -> None:
         dialog = SettingsDialog(self.settings, self.window)
@@ -271,7 +288,11 @@ class HarborRuntime:
         dialog.show()
 
     def _new_conversation(self) -> None:
-        self._running_loop().create_task(self.graph.coordinator.new_conversation())
+        active = self._operation_task
+        if active is not None and not active.done():
+            self.graph.coordinator.cancel_speech()
+            active.cancel()
+        self._start_operation(self._new_conversation_after(active))
         self.window.set_turn("", "")
 
     def _quit(self) -> None:
@@ -286,6 +307,39 @@ class HarborRuntime:
             return asyncio.get_running_loop()
         except RuntimeError:
             return self.loop
+
+    def _start_operation(self, operation: Coroutine[Any, Any, None]) -> asyncio.Task[None]:
+        task = self._running_loop().create_task(operation)
+        self._operation_task = task
+        return task
+
+    def _render_state(self) -> None:
+        visible = AppState.MUTED if self._muted else self._operation_state
+        self.tray.set_state(visible)
+        self.window.set_state(visible)
+
+    async def _submit_after(
+        self,
+        previous: asyncio.Task[None] | None,
+        recording,
+    ) -> None:
+        await self._finish_previous(previous)
+        await self._submit(recording)
+
+    async def _new_conversation_after(self, previous: asyncio.Task[None] | None) -> None:
+        await self._finish_previous(previous)
+        await self.graph.coordinator.new_conversation()
+
+    @staticmethod
+    async def _finish_previous(previous: asyncio.Task[None] | None) -> None:
+        if previous is None or previous.done():
+            return
+        with suppress(asyncio.CancelledError):
+            await previous
+
+    @staticmethod
+    async def _nothing() -> None:
+        return None
 
 
 def _choose_initial_workspace(settings: AssistantSettings) -> AssistantSettings | None:
@@ -303,6 +357,7 @@ def main() -> int:
     application = QApplication(sys.argv)
     application.setQuitOnLastWindowClosed(False)
     paths = AppPaths.from_root(Path(user_data_path("HarborVoice")))
+    paths.ensure_owned_root()
     settings_store = SettingsStore(paths.settings)
     settings = _choose_initial_workspace(settings_store.load())
     if settings is None:

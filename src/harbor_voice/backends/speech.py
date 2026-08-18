@@ -58,11 +58,16 @@ class SapiSpeaker:
         self._generation = 0
         self._generation_lock = threading.Lock()
         self._engine = None
+        self._startup_error: Exception | None = None
+        self._startup_ready = threading.Event()
         self._closed = False
         self._worker = threading.Thread(target=self._run, name="harbor-sapi", daemon=True)
         self._worker.start()
 
     async def speak(self, text: str) -> None:
+        await asyncio.to_thread(self._startup_ready.wait)
+        if self._startup_error is not None:
+            raise RuntimeError("SAPI speech engine failed to initialize") from self._startup_error
         generation = self._current_generation()
         for segment in split_for_speech(text):
             if generation != self._current_generation() or self._closed:
@@ -92,7 +97,13 @@ class SapiSpeaker:
             return self._generation
 
     def _run(self) -> None:
-        self._engine = self._engine_factory()
+        try:
+            self._engine = self._engine_factory()
+        except Exception as exc:
+            self._startup_error = exc
+            self._startup_ready.set()
+            return
+        self._startup_ready.set()
         while True:
             command = self._commands.get()
             if command is None:
@@ -116,4 +127,3 @@ class SapiSpeaker:
             future.set_result(None)
         else:
             future.set_exception(error)
-

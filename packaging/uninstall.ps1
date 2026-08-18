@@ -25,6 +25,18 @@ function Resolve-SafeRemovalTarget {
     return $full
 }
 
+function Assert-OwnedRemovalTarget {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)][string]$Marker,
+        [Parameter(Mandatory = $true)][string]$Label
+    )
+    $markerPath = Join-Path $Path $Marker
+    if (-not (Test-Path -LiteralPath $markerPath -PathType Leaf)) {
+        throw "Refusing $Label removal because its Harbor Voice ownership marker is missing: $Path"
+    }
+}
+
 $installPath = Resolve-SafeRemovalTarget -Path $InstallRoot -Label 'installation'
 $menuPath = Resolve-SafeRemovalTarget -Path $StartMenuRoot -Label 'Start Menu'
 $dataPath = Resolve-SafeRemovalTarget -Path $DataRoot -Label 'user data'
@@ -43,12 +55,18 @@ if ($configuredRunValue -eq $expectedRunValue) {
     Remove-ItemProperty -Path $runKey -Name 'HarborVoice'
 }
 if (Test-Path -LiteralPath $menuPath) {
+    Assert-OwnedRemovalTarget -Path $menuPath -Marker '.harbor-voice-start-menu' `
+        -Label 'Start Menu'
     Remove-Item -LiteralPath $menuPath -Recurse -Force
 }
 if (Test-Path -LiteralPath $installPath) {
+    Assert-OwnedRemovalTarget -Path $installPath -Marker '.harbor-voice-installation' `
+        -Label 'installation'
     Remove-Item -LiteralPath $installPath -Recurse -Force
 }
 if ($RemoveUserData -and (Test-Path -LiteralPath $dataPath)) {
+    Assert-OwnedRemovalTarget -Path $dataPath -Marker '.harbor-voice-data' `
+        -Label 'user data'
     Remove-Item -LiteralPath $dataPath -Recurse -Force
 }
 

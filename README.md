@@ -7,7 +7,7 @@
 <p align="center">
   <img alt="Windows 10 and 11" src="https://img.shields.io/badge/Windows-10%20%7C%2011-38bdf8">
   <img alt="Python 3.11 and 3.12" src="https://img.shields.io/badge/Python-3.11%20%7C%203.12-818cf8">
-  <img alt="110 automated tests" src="https://img.shields.io/badge/tests-110%20passed-2dd4bf">
+  <img alt="120 automated tests" src="https://img.shields.io/badge/tests-120-2dd4bf">
   <a href="LICENSE"><img alt="MIT licence" src="https://img.shields.io/badge/license-MIT-fbbf24"></a>
 </p>
 
@@ -105,7 +105,7 @@ a separate typed action layer:
 | --- | --- |
 | General answers and web research | Automatic |
 | Read inside the selected folder | Automatic |
-| Write inside the selected folder | One visible approval, then one `workspace_write` turn |
+| Write inside the selected folder | One visible approval, then one atomic write to the exact target |
 | Read clipboard text | Automatic only when requested |
 | Replace clipboard text | One visible approval |
 | Open registered application | One visible approval |
@@ -219,7 +219,7 @@ approval reuse, storage privacy, UI behaviour, and installer semantics have dedi
 uv run pytest -q
 ```
 
-The current suite contains 110 tests. Hardware and authenticated Codex conversation checks
+The current suite contains 120 tests. Hardware and authenticated Codex conversation checks
 remain explicit manual smoke tests on the target Windows account.
 
 ## Roadmap
