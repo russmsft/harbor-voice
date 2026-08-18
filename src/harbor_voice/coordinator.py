@@ -54,6 +54,8 @@ class TurnCoordinator:
         self._pending: PendingApproval | None = None
         self._state = AppState.IDLE
         self.last_error: str | None = None
+        self.last_transcript = ""
+        self.last_response = ""
 
     @property
     def pending(self) -> PendingApproval | None:
@@ -74,6 +76,7 @@ class TurnCoordinator:
             if not text:
                 self._publish(AppState.IDLE)
                 return
+            self.last_transcript = text
 
             self._publish(AppState.THINKING)
             response = await self._backend.ask(AssistantRequest(text=text))
@@ -120,6 +123,8 @@ class TurnCoordinator:
         self._speaker.cancel()
         self._pending = None
         self.last_error = None
+        self.last_transcript = ""
+        self.last_response = ""
         await self._backend.reset()
         self._publish(AppState.IDLE)
 
@@ -145,6 +150,7 @@ class TurnCoordinator:
         await self._speak(result.message)
 
     async def _speak(self, text: str) -> None:
+        self.last_response = text.strip()
         if not text.strip():
             self._publish(AppState.IDLE)
             return
@@ -159,4 +165,3 @@ class TurnCoordinator:
     def _publish(self, state: AppState) -> None:
         self._state = state
         self._state_sink(state)
-

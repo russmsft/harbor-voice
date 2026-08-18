@@ -84,6 +84,17 @@ async def test_message_turn_transcribes_asks_and_speaks(rig: Rig) -> None:
 
 
 @pytest.mark.asyncio
+async def test_completed_message_turn_exposes_display_text(rig: Rig) -> None:
+    rig.transcriber.result = Transcript("What time is it?", confidence=0.9)
+    rig.backend.response = MessageResponse(kind="message", message="It is noon.")
+
+    await rig.coordinator.submit(sample_recording())
+
+    assert rig.coordinator.last_transcript == "What time is it?"
+    assert rig.coordinator.last_response == "It is noon."
+
+
+@pytest.mark.asyncio
 async def test_confirmation_has_no_effect_before_approval(rig: Rig) -> None:
     rig.backend.response = proposed(ActionKind.OPEN_URL, "https://example.com")
 
@@ -199,4 +210,3 @@ async def test_new_conversation_clears_pending_and_resets_backend(rig: Rig) -> N
     assert rig.coordinator.pending is None
     assert rig.backend.reset_calls == 1
     assert rig.states[-1] is AppState.IDLE
-
