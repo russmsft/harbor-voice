@@ -1,0 +1,14 @@
+.venv/
+.bootstrap/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+build/
+dist/
+*.spec.bak
+.coverage
+htmlcov/
+*.log
+models/
+recordings/
