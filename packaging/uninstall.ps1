@@ -30,7 +30,18 @@ $menuPath = Resolve-SafeRemovalTarget -Path $StartMenuRoot -Label 'Start Menu'
 $dataPath = Resolve-SafeRemovalTarget -Path $DataRoot -Label 'user data'
 
 $runKey = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'
-Remove-ItemProperty -Path $runKey -Name 'HarborVoice' -ErrorAction SilentlyContinue
+$expectedRunValue = '"' + (Join-Path $installPath 'HarborVoice.exe') + '"'
+$configuredRunValue = $null
+$runValues = Get-ItemProperty -Path $runKey -ErrorAction SilentlyContinue
+if ($null -ne $runValues) {
+    $runProperty = $runValues.PSObject.Properties['HarborVoice']
+    if ($null -ne $runProperty) {
+        $configuredRunValue = $runProperty.Value
+    }
+}
+if ($configuredRunValue -eq $expectedRunValue) {
+    Remove-ItemProperty -Path $runKey -Name 'HarborVoice'
+}
 if (Test-Path -LiteralPath $menuPath) {
     Remove-Item -LiteralPath $menuPath -Recurse -Force
 }
@@ -45,4 +56,3 @@ Write-Output 'Harbor Voice uninstalled.'
 if (-not $RemoveUserData) {
     Write-Output "User data preserved at $dataPath"
 }
-
