@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass, field
+from pathlib import Path
 
-from harbor_voice.diagnostics import CheckResult, run_diagnostics
+from harbor_voice.diagnostics import CheckResult, SystemChecks, run_diagnostics
+from harbor_voice.storage import SettingsStore
 
 
 @dataclass
@@ -51,3 +53,13 @@ def test_diagnostic_report_is_valid_json() -> None:
 
     assert payload[0] == {"name": "runtime", "status": "ok", "detail": "runtime available"}
 
+
+def test_workspace_diagnostic_does_not_quarantine_invalid_settings(tmp_path: Path) -> None:
+    path = tmp_path / "settings.json"
+    path.write_text("{not json", encoding="utf-8")
+
+    result = SystemChecks(SettingsStore(path)).workspace()
+
+    assert result.status == "unavailable"
+    assert path.read_text(encoding="utf-8") == "{not json"
+    assert list(tmp_path.glob("settings.invalid-*.json")) == []

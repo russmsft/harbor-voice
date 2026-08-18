@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from time import monotonic
+from typing import Literal
 from uuid import UUID
 
 from harbor_voice.domain import (
@@ -42,6 +44,7 @@ class TurnCoordinator:
         runner: ActionRunner,
         policy: PermissionPolicy,
         state_sink: StateSink,
+        history_sink: Callable[[Literal["user", "assistant"], str], None] | None = None,
         clock=monotonic,
     ) -> None:
         self._transcriber = transcriber
@@ -50,6 +53,7 @@ class TurnCoordinator:
         self._runner = runner
         self._policy = policy
         self._state_sink = state_sink
+        self._history_sink = history_sink or (lambda role, text: None)
         self._clock = clock
         self._pending: PendingApproval | None = None
         self._state = AppState.IDLE
@@ -69,6 +73,8 @@ class TurnCoordinator:
         """Transcribe and process one in-memory recording."""
         self._speaker.cancel()
         self.last_error = None
+        self.last_transcript = ""
+        self.last_response = ""
         try:
             self._publish(AppState.TRANSCRIBING)
             transcript = await self._transcriber.transcribe(recording)
@@ -77,6 +83,7 @@ class TurnCoordinator:
                 self._publish(AppState.IDLE)
                 return
             self.last_transcript = text
+            self._history_sink("user", text)
 
             self._publish(AppState.THINKING)
             response = await self._backend.ask(AssistantRequest(text=text))
@@ -154,6 +161,7 @@ class TurnCoordinator:
         if not text.strip():
             self._publish(AppState.IDLE)
             return
+        self._history_sink("assistant", self.last_response)
         self._publish(AppState.SPEAKING)
         await self._speaker.speak(text)
         self._publish(AppState.IDLE)

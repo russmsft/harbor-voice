@@ -80,7 +80,7 @@ class SystemChecks:
         return CheckResult("codex", "ok", "Codex Python SDK is installed")
 
     def workspace(self) -> CheckResult:
-        workspace = self._settings_store.load().workspace
+        workspace = self._settings_store.load(quarantine_invalid=False).workspace
         if workspace is None:
             return CheckResult("workspace", "unavailable", "No working folder selected")
         return CheckResult("workspace", "ok", str(workspace))
@@ -129,4 +129,3 @@ def main(argv: list[str] | None = None) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

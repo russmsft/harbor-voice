@@ -10,7 +10,13 @@ from PySide6.QtWidgets import QApplication
 
 from harbor_voice.app import HarborRuntime, ProviderBundle, build_components
 from harbor_voice.domain import ActionResult, AudioRecording, MessageResponse, Transcript
-from harbor_voice.storage import AppPaths, AssistantSettings, SettingsStore
+from harbor_voice.storage import (
+    AppPaths,
+    AssistantSettings,
+    HistoryStore,
+    Retention,
+    SettingsStore,
+)
 from harbor_voice.ui.tray import SingleInstanceGuard, TrayController
 from harbor_voice.ui.window import ConversationWindow
 from tests.fakes import FakeBackend, FakeRunner, FakeSpeaker, FakeTranscriber
@@ -57,6 +63,12 @@ class FakeHotkey:
         self.events.append("hotkey.stop")
 
 
+class FailingHistoryStore:
+    def append(self, entry) -> None:
+        del entry
+        raise OSError("history unavailable")
+
+
 @dataclass
 class RuntimeRig:
     runtime: HarborRuntime
@@ -83,7 +95,7 @@ async def runtime_rig(tmp_path: Path, qapp: QApplication) -> RuntimeRig:
         runner=FakeRunner(events, ActionResult(True, "done")),
     )
     paths = AppPaths.from_root(tmp_path / "data")
-    settings = AssistantSettings(workspace=tmp_path)
+    settings = AssistantSettings(workspace=tmp_path, retention=Retention.SEVEN_DAYS)
     runtime = HarborRuntime(
         application=qapp,
         loop=asyncio.get_running_loop(),
@@ -140,6 +152,35 @@ async def test_release_submits_recording_and_updates_window(runtime_rig: Runtime
 
     assert runtime_rig.backend.requests[0].text == "hello"
     assert runtime_rig.runtime.window.transcript_text.toPlainText() == "hello"
+    assert runtime_rig.runtime.window.response_text.toPlainText() == "A safe response."
+
+
+@pytest.mark.asyncio
+async def test_release_applies_configured_transcript_retention(
+    runtime_rig: RuntimeRig,
+) -> None:
+    runtime_rig.runtime.handle_press()
+
+    await runtime_rig.runtime.handle_release()
+
+    entries = HistoryStore(
+        runtime_rig.runtime.paths.history,
+        Retention.SEVEN_DAYS,
+    ).read()
+    assert [(entry.role, entry.text) for entry in entries] == [
+        ("user", "hello"),
+        ("assistant", "A safe response."),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_history_write_failure_does_not_break_voice_turn(runtime_rig: RuntimeRig) -> None:
+    runtime_rig.runtime.history_store = FailingHistoryStore()
+    runtime_rig.runtime.handle_press()
+
+    await runtime_rig.runtime.handle_release()
+
+    assert runtime_rig.runtime.graph.coordinator.last_error is None
     assert runtime_rig.runtime.window.response_text.toPlainText() == "A safe response."
 
 

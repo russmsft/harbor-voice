@@ -71,12 +71,14 @@ class SettingsStore:
         self.path = path
         self._clock = clock
 
-    def load(self) -> AssistantSettings:
+    def load(self, *, quarantine_invalid: bool = True) -> AssistantSettings:
         if not self.path.exists():
             return AssistantSettings()
         try:
             return AssistantSettings.model_validate_json(self.path.read_text(encoding="utf-8"))
         except (OSError, ValidationError, ValueError):
+            if not quarantine_invalid:
+                return AssistantSettings()
             timestamp = self._clock().astimezone(UTC).strftime("%Y%m%d-%H%M%S")
             quarantine = self.path.with_name(f"settings.invalid-{timestamp}.json")
             os.replace(self.path, quarantine)

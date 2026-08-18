@@ -67,6 +67,15 @@ def test_expired_approval_disables_execution(qtbot: QtBot) -> None:
     assert "expired" in dialog.status_label.text().casefold()
 
 
+def test_approval_dialog_starts_five_minute_expiry_timer(qtbot: QtBot) -> None:
+    dialog = ApprovalDialog(proposal())
+    qtbot.addWidget(dialog)
+
+    assert dialog.expiry_timer.isSingleShot()
+    assert dialog.expiry_timer.interval() == 300_000
+    assert dialog.expiry_timer.isActive()
+
+
 def test_close_hides_conversation_without_quitting(qtbot: QtBot) -> None:
     window = ConversationWindow()
     qtbot.addWidget(window)

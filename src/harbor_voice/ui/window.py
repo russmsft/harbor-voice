@@ -6,7 +6,7 @@ from pathlib import Path
 from uuid import UUID
 
 from pydantic import ValidationError
-from PySide6.QtCore import Signal
+from PySide6.QtCore import QTimer, Signal
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -93,6 +93,11 @@ class ApprovalDialog(QDialog):
         layout.addWidget(buttons)
         self.approve_button.clicked.connect(self._approve)
         self.reject_button.clicked.connect(self._reject)
+        self.expiry_timer = QTimer(self)
+        self.expiry_timer.setSingleShot(True)
+        self.expiry_timer.setInterval(300_000)
+        self.expiry_timer.timeout.connect(self.expire)
+        self.expiry_timer.start()
 
     def expire(self) -> None:
         self.approve_button.setEnabled(False)

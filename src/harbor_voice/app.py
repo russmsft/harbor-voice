@@ -28,7 +28,14 @@ from harbor_voice.backends.transcription import FasterWhisperTranscriber
 from harbor_voice.coordinator import TurnCoordinator
 from harbor_voice.domain import ActionKind, AppState
 from harbor_voice.policy import PermissionPolicy
-from harbor_voice.storage import AppPaths, AssistantSettings, SettingsStore, configure_logging
+from harbor_voice.storage import (
+    AppPaths,
+    AssistantSettings,
+    HistoryEntry,
+    HistoryStore,
+    SettingsStore,
+    configure_logging,
+)
 from harbor_voice.ui.tray import SingleInstanceGuard, TrayController
 from harbor_voice.ui.window import ApprovalDialog, ConversationWindow, SettingsDialog
 
@@ -54,6 +61,7 @@ def build_components(
     providers: ProviderBundle,
     *,
     state_sink,
+    history_sink=None,
 ) -> ComponentGraph:
     if settings.workspace is None:
         raise ValueError("a working folder must be selected")
@@ -65,6 +73,7 @@ def build_components(
         runner=providers.runner,
         policy=policy,
         state_sink=state_sink,
+        history_sink=history_sink,
     )
     return ComponentGraph(policy, coordinator, providers)
 
@@ -134,7 +143,13 @@ class HarborRuntime:
         self.tray = tray or TrayController()
         self.window = window or ConversationWindow()
         self.guard = guard or SingleInstanceGuard(paths.root / "instance.lock")
-        self.graph = build_components(settings, providers, state_sink=self._set_state)
+        self.history_store = HistoryStore(paths.history, settings.retention)
+        self.graph = build_components(
+            settings,
+            providers,
+            state_sink=self._set_state,
+            history_sink=self._record_history,
+        )
         self._bridge = _HotkeyBridge()
         self._hotkey = hotkey_factory(
             settings.ptt_key,
@@ -194,6 +209,15 @@ class HarborRuntime:
             self.graph.coordinator.last_response,
         )
 
+    def _record_history(self, role: str, text: str) -> None:
+        try:
+            self.history_store.append(HistoryEntry(role=role, text=text))
+        except OSError:
+            self.tray.notify(
+                "Harbor Voice",
+                "This turn could not be added to transcript history.",
+            )
+
     def _set_state(self, state: AppState) -> None:
         self.tray.set_state(state)
         self.window.set_state(state)
@@ -241,7 +265,7 @@ class HarborRuntime:
         def save(settings: AssistantSettings) -> None:
             self.settings_store.save(settings)
             self.settings = settings
-            self.tray.notify("Harbor Voice", "Settings saved. Restart to apply device changes.")
+            self.tray.notify("Harbor Voice", "Settings saved. Restart to apply these changes.")
 
         dialog.saved.connect(save)
         dialog.show()
@@ -306,4 +330,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-
