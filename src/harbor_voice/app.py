@@ -4,10 +4,11 @@ from __future__ import annotations
 
 import asyncio
 import sys
+from collections.abc import Coroutine
 from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Coroutine
+from typing import Any
 
 import qasync
 from platformdirs import user_data_path
@@ -23,7 +24,7 @@ from harbor_voice.actions import (
 )
 from harbor_voice.audio.capture import MemoryRecorder
 from harbor_voice.audio.hotkey import GlobalHoldKey
-from harbor_voice.backends.codex import CodexBackend
+from harbor_voice.backends.copilot import CopilotCliBackend
 from harbor_voice.backends.speech import SapiSpeaker
 from harbor_voice.backends.transcription import FasterWhisperTranscriber
 from harbor_voice.coordinator import TurnCoordinator
@@ -116,8 +117,13 @@ class QtClipboard:
         self._clipboard.setText(text)
 
 
-def default_providers(settings: AssistantSettings, application: QApplication) -> ProviderBundle:
-    backend = CodexBackend()
+def default_providers(
+    settings: AssistantSettings,
+    application: QApplication,
+    *,
+    copilot_home: Path,
+) -> ProviderBundle:
+    backend = CopilotCliBackend(copilot_home=copilot_home)
     clipboard = ClipboardExecutor(QtClipboard(application))
     runner = ActionRouter(
         {
@@ -508,7 +514,11 @@ def main() -> int:
         paths=paths,
         settings=settings,
         settings_store=settings_store,
-        providers=default_providers(settings, application),
+        providers=default_providers(
+            settings,
+            application,
+            copilot_home=paths.root / "copilot-cli",
+        ),
         startup_registration=startup_registration,
     )
     with loop:

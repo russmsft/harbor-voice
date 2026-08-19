@@ -4,7 +4,8 @@ Harbor Voice depends on independently licensed packages and models. Their licenc
 
 Major runtime components include:
 
-- OpenAI Codex Python SDK and its bundled runtime (Apache-2.0 package metadata).
+- GitHub Copilot CLI is an external prerequisite and remains subject to GitHub's
+  applicable product terms; it is not bundled with Harbor Voice.
 - PySide6 / Qt for Python (LGPL-3.0-only OR GPL-2.0-only OR GPL-3.0-only in the
   installed package metadata; separate commercial terms may also be available).
 - faster-whisper and CTranslate2 (MIT).

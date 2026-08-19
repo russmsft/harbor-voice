@@ -1,5 +1,10 @@
 # Harbor Voice Design Specification
 
+> Provider update (2026-08-19): Harbor Voice now uses the GitHub Copilot CLI in
+> restricted non-interactive mode instead of the original Codex SDK design. The
+> implementation and README are authoritative for the current provider boundary;
+> Codex-specific sections below are retained as historical design rationale. Specification
+
 ## Purpose
 
 Harbor Voice is a personal, Windows-first voice assistant that lives in the system tray. It lets one user hold a global shortcut, speak a request, hear the response, and approve a small set of clearly described computer actions. It is an original implementation informed by common voice-assistant patterns; it does not reuse Backtalk source, assets, configuration, wording, identifiers, or branding.

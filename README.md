@@ -7,7 +7,7 @@
 <p align="center">
   <img alt="Windows 10 and 11" src="https://img.shields.io/badge/Windows-10%20%7C%2011-38bdf8">
   <img alt="Python 3.11 and 3.12" src="https://img.shields.io/badge/Python-3.11%20%7C%203.12-818cf8">
-  <img alt="142 automated tests" src="https://img.shields.io/badge/tests-142-2dd4bf">
+  <img alt="149 automated tests" src="https://img.shields.io/badge/tests-149%20passed-2dd4bf">
   <a href="LICENSE"><img alt="MIT licence" src="https://img.shields.io/badge/license-MIT-fbbf24"></a>
 </p>
 
@@ -15,7 +15,8 @@
 
 Harbor Voice lives in the Windows system tray. Hold `F9`, speak, release, and hear a
 concise response. Microphone capture, transcription, and speech stay local by default;
-reasoning and project work use your existing local Codex installation and authentication.
+reasoning and project work use your existing GitHub Copilot CLI installation and
+authentication.
 
 This is an original implementation inspired by the idea of a desktop voice interface. It
 does not contain Backtalk source, assets, prompts, configuration, copy, or branding.
@@ -27,7 +28,7 @@ Harbor Voice is designed around the opposite priority:
 
 - no always-listening microphone;
 - no audio recordings written to disk;
-- read-only Codex turns by default;
+- read-only GitHub Copilot CLI tools by default;
 - typed desktop actions instead of a generic shell executor;
 - exact, visible, expiring approval for every mutating action;
 - one selected workspace rather than unrestricted filesystem access;
@@ -39,8 +40,9 @@ Harbor Voice is designed around the opposite priority:
 - In-memory, 16 kHz mono microphone capture.
 - Local transcription with faster-whisper (`base.en` by default).
 - Local Windows SAPI speech with immediate interruption.
-- One persistent Codex conversation in a selected working folder.
-- Read-only normal turns with Codex SDK approvals denied.
+- In-memory conversation context backed by non-interactive GitHub Copilot CLI turns.
+- Normal turns expose only file-view/search tools; shell, file-edit, network,
+  GitHub MCP, custom instructions, remote control, and remote session export are disabled.
 - One-shot confirmation for workspace file changes, registered applications, HTTPS pages,
   and clipboard replacement.
 - Automatic read-only folder research and requested clipboard reading.
@@ -58,9 +60,9 @@ flowchart LR
     PTT["Hold F9"] --> REC["Audio in memory"]
     REC --> STT["Local faster-whisper"]
     STT --> COORD["Turn coordinator"]
-    COORD --> CODEX["Codex · read-only"]
-    CODEX --> MSG["Spoken response"]
-    CODEX --> PROPOSAL["Typed action proposal"]
+    COORD --> COPILOT["GitHub Copilot CLI · workspace read tools"]
+    COPILOT --> MSG["Spoken response"]
+    COPILOT --> PROPOSAL["Typed action proposal"]
     PROPOSAL --> POLICY{"Permission policy"}
     POLICY -->|"blocked"| STOP["No effect"]
     POLICY -->|"approval required"| DIALOG["Exact target · 5 minute expiry"]
@@ -76,8 +78,8 @@ application-owned policy layer. Malformed structured output becomes a safe no-ac
 - Windows 10 or 11.
 - Python 3.11 or 3.12 for development.
 - [uv](https://docs.astral.sh/uv/) for dependency management and builds.
-- Codex installed and authenticated for live conversations. The integration follows the
-  official [Codex SDK documentation](https://developers.openai.com/codex/sdk/).
+- [GitHub Copilot CLI](https://docs.github.com/copilot/how-tos/copilot-cli) installed,
+  available as `copilot`, and authenticated with `copilot login`.
 - A working microphone and Windows SAPI voice.
 
 The first transcription downloads the selected Whisper model. The default `base.en` model
@@ -88,6 +90,7 @@ keeps the initial download and CPU latency modest.
 ```powershell
 git clone https://github.com/russmsft/harbor-voice.git
 cd harbor-voice
+copilot login
 uv sync --group dev
 uv run harbor-voice-doctor --json
 uv run harbor-voice
@@ -98,12 +101,14 @@ to submit. Starting another recording while speech is playing stops playback fir
 
 ## Permission model
 
-Normal Codex turns use a read-only sandbox and deny SDK approval requests. Harbor Voice owns
-a separate typed action layer:
+Normal GitHub Copilot CLI turns expose only `view`, `grep`, and `glob`. They cannot use
+shell, edit, network, GitHub MCP, custom instruction, or memory tools.
+Harbor Voice owns a separate typed action layer:
 
 | Action | Behaviour |
 | --- | --- |
-| General answers and web research | Automatic |
+| General answers | Automatic |
+| Web access | Blocked during reasoning; opening an HTTPS page requires approval |
 | Read inside the selected folder | Automatic |
 | Write inside the selected folder | One visible approval, then one atomic write to the exact target |
 | Read clipboard text | Automatic only when requested |
@@ -122,17 +127,18 @@ launches are restricted to executable paths explicitly registered in local setti
 | Microphone audio | Held in memory for the current turn; never deliberately saved |
 | Speech recognition | Local faster-whisper model |
 | Speech output | Local Windows SAPI |
-| Transcript history | Current session only |
+| Harbor Voice transcript history | Current session only |
+| Copilot prompts and responses | Sent to GitHub Copilot; isolated CLI state is stored under `%LOCALAPPDATA%\HarborVoice\copilot-cli` |
 | Settings and optional history | `%LOCALAPPDATA%\HarborVoice` |
 | Operational logs | Rotating local files with sensitive fields redacted |
-| Codex credentials | Managed by the existing Codex installation, not Harbor Voice |
+| GitHub credentials | Managed by the existing GitHub Copilot CLI installation, not Harbor Voice |
 
 Retention can be changed to seven days, thirty days, or indefinite. Operational logs exclude
 recordings, prompts, responses, clipboard bodies, tokens, and secrets.
 
 ## Diagnostics
 
-The doctor is read-only. It checks the runtime, Codex SDK, selected workspace, microphone,
+The doctor is read-only. It checks the runtime, GitHub Copilot CLI, selected workspace, microphone,
 SAPI voices, and hotkey library without authenticating, downloading a model, launching an
 application, writing, or changing settings.
 
@@ -205,7 +211,7 @@ normal app startup rather than partially applied.
 | `src/harbor_voice/domain.py` | Strict response and action contracts |
 | `src/harbor_voice/policy.py` | Least-privilege permission decisions |
 | `src/harbor_voice/coordinator.py` | Interruptible turn and approval state machine |
-| `src/harbor_voice/backends/` | Codex, faster-whisper, and SAPI adapters |
+| `src/harbor_voice/backends/` | GitHub Copilot CLI, faster-whisper, and SAPI adapters |
 | `src/harbor_voice/actions.py` | Typed Windows action executors |
 | `src/harbor_voice/ui/` | Tray, conversation, approval, and settings UI |
 | `src/harbor_voice/storage.py` | Settings, retention, and privacy-filtered logging |
@@ -214,7 +220,7 @@ normal app startup rather than partially applied.
 
 ## Testing philosophy
 
-The default suite runs without Codex credentials, network access, microphone input, or
+The default suite runs without GitHub Copilot credentials, network access, microphone input, or
 speaker output. Provider boundaries are tested with fakes; policy, expiry, path traversal,
 approval reuse, storage privacy, UI behaviour, and installer semantics have dedicated tests.
 
@@ -222,7 +228,7 @@ approval reuse, storage privacy, UI behaviour, and installer semantics have dedi
 uv run pytest -q
 ```
 
-The current suite contains 120 tests. Hardware and authenticated Codex conversation checks
+The current suite contains 149 tests. Hardware and authenticated GitHub Copilot conversation checks
 remain explicit manual smoke tests on the target Windows account.
 
 ## Roadmap
@@ -243,7 +249,7 @@ escape hatch. Add or update tests for every behaviour change.
 ## Status
 
 Harbor Voice is a personal MVP, not a security boundary for hostile multi-user machines.
-Review proposed actions before approving them, and smoke-test microphone, voice, Codex
+Review proposed actions before approving them, and smoke-test microphone, voice, GitHub Copilot
 authentication, model download, and packaged behaviour on the intended Windows account.
 
 ## Licence

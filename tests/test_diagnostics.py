@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass, field
 from pathlib import Path
+from types import SimpleNamespace
 
 from harbor_voice.diagnostics import CheckResult, SystemChecks, run_diagnostics
 from harbor_voice.storage import SettingsStore
@@ -20,8 +21,8 @@ class FakeChecks:
     def runtime(self) -> CheckResult:
         return self._check("runtime")
 
-    def codex(self) -> CheckResult:
-        return self._check("codex")
+    def copilot(self) -> CheckResult:
+        return self._check("copilot")
 
     def workspace(self) -> CheckResult:
         return self._check("workspace")
@@ -41,7 +42,7 @@ def test_doctor_runs_expected_read_only_checks() -> None:
 
     report = run_diagnostics(checks)
 
-    assert checks.names == ["runtime", "codex", "workspace", "microphone", "voice", "hotkey"]
+    assert checks.names == ["runtime", "copilot", "workspace", "microphone", "voice", "hotkey"]
     assert checks.effects == []
     assert report.ok is True
 
@@ -63,3 +64,33 @@ def test_workspace_diagnostic_does_not_quarantine_invalid_settings(tmp_path: Pat
     assert result.status == "unavailable"
     assert path.read_text(encoding="utf-8") == "{not json"
     assert list(tmp_path.glob("settings.invalid-*.json")) == []
+
+
+def test_copilot_diagnostic_reports_installed_cli(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    executable = tmp_path / "copilot.exe"
+    executable.write_bytes(b"cli")
+    monkeypatch.setattr("harbor_voice.diagnostics.shutil.which", lambda name: str(executable))
+    monkeypatch.setattr(
+        "harbor_voice.diagnostics.subprocess.run",
+        lambda *args, **kwargs: SimpleNamespace(
+            returncode=0,
+            stdout="GitHub Copilot CLI 1.0.76\n",
+            stderr="",
+        ),
+    )
+
+    result = SystemChecks(SettingsStore(tmp_path / "settings.json")).copilot()
+
+    assert result == CheckResult("copilot", "ok", "GitHub Copilot CLI 1.0.76")
+
+
+def test_copilot_diagnostic_reports_missing_cli(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr("harbor_voice.diagnostics.shutil.which", lambda name: None)
+
+    result = SystemChecks(SettingsStore(tmp_path / "settings.json")).copilot()
+
+    assert result.status == "unavailable"
+    assert "not found" in result.detail

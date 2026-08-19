@@ -8,7 +8,6 @@ requires-python = ">=3.11,<3.13"
 dependencies = [
   "faster-whisper",
   "numpy>=1.26",
-  "openai-codex",
   "platformdirs>=4",
   "pydantic>=2.12",
   "pynput>=1.8",

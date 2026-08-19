@@ -27,6 +27,7 @@ def proposal(
 @pytest.mark.parametrize("relative", ["notes.txt", "folder/report.md"])
 def test_workspace_file_write_requires_confirmation(tmp_path: Path, relative: str) -> None:
     policy = PermissionPolicy(tmp_path, registered_apps={})
+    (tmp_path / relative).parent.mkdir(parents=True, exist_ok=True)
 
     decision = policy.evaluate(proposal(ActionKind.FILE_WRITE, str(tmp_path / relative)), now=100)
 

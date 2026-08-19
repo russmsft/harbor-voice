@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import argparse
 import json
+import shutil
+import subprocess
 import sys
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -36,7 +38,7 @@ class DiagnosticReport:
 class DiagnosticChecks(Protocol):
     def runtime(self) -> CheckResult: ...
 
-    def codex(self) -> CheckResult: ...
+    def copilot(self) -> CheckResult: ...
 
     def workspace(self) -> CheckResult: ...
 
@@ -51,7 +53,7 @@ def run_diagnostics(checks: DiagnosticChecks) -> DiagnosticReport:
     return DiagnosticReport(
         [
             checks.runtime(),
-            checks.codex(),
+            checks.copilot(),
             checks.workspace(),
             checks.microphone(),
             checks.voice(),
@@ -72,12 +74,24 @@ class SystemChecks:
             f"Python {sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}",
         )
 
-    def codex(self) -> CheckResult:
+    def copilot(self) -> CheckResult:
+        executable = shutil.which("copilot")
+        if executable is None:
+            return CheckResult("copilot", "unavailable", "GitHub Copilot CLI was not found")
         try:
-            import openai_codex  # noqa: F401
+            completed = subprocess.run(
+                [executable, "--version"],
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=5,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            )
         except Exception as exc:
-            return CheckResult("codex", "unavailable", str(exc))
-        return CheckResult("codex", "ok", "Codex Python SDK is installed")
+            return CheckResult("copilot", "unavailable", str(exc))
+        detail = (completed.stdout or completed.stderr).strip()
+        status = "ok" if completed.returncode == 0 else "unavailable"
+        return CheckResult("copilot", status, detail or "GitHub Copilot CLI returned no version")
 
     def workspace(self) -> CheckResult:
         workspace = self._settings_store.load(quarantine_invalid=False).workspace

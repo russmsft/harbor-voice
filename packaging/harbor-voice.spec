@@ -10,7 +10,6 @@ hiddenimports = []
 for package in (
     "ctranslate2",
     "faster_whisper",
-    "openai_codex",
     "pyttsx3",
     "sounddevice",
 ):
@@ -68,4 +67,3 @@ collection = COLLECT(
     upx=True,
     name="HarborVoice",
 )
-
