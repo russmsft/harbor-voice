@@ -1,5 +1,6 @@
-import harbor_voice.startup
 import pytest
+
+import harbor_voice.startup
 from harbor_voice.startup import StartupEntry, StartupRegistration
 
 

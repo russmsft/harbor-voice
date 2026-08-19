@@ -32,22 +32,34 @@ class FakeSapiEngine:
         self.current = ""
         self.completed: list[str] = []
         self.stop_calls = 0
+        self.busy = False
+        self.in_loop = False
 
     def say(self, text: str) -> None:
         self.current = text
+        self.busy = True
 
-    def runAndWait(self) -> None:
+    def startLoop(self, use_driver_loop: bool) -> None:
+        assert use_driver_loop is False
+        self.in_loop = True
         self.started.set()
-        self.release.wait(timeout=2)
-        if self.stop_calls == 0:
+
+    def iterate(self) -> None:
+        assert self.in_loop
+        if self.release.is_set() and self.busy:
             self.completed.append(self.current)
-        else:
-            self.release.clear()
+            self.busy = False
+
+    def isBusy(self) -> bool:
+        return self.busy
+
+    def endLoop(self) -> None:
+        self.in_loop = False
         self.started.clear()
 
     def stop(self) -> None:
         self.stop_calls += 1
-        self.release.set()
+        self.busy = False
 
 
 @pytest.mark.asyncio
@@ -60,6 +72,21 @@ async def test_speaker_reads_all_segments_in_order() -> None:
     await speaker.close()
 
     assert engine.completed == ["One.", "Two."]
+
+
+@pytest.mark.asyncio
+async def test_idle_cancel_does_not_stop_or_break_repeated_speech() -> None:
+    engine = FakeSapiEngine()
+    engine.release.set()
+    speaker = SapiSpeaker(engine_factory=lambda: engine)
+
+    await speaker.speak("First response.")
+    speaker.cancel()
+    await speaker.speak("Second response.")
+    await speaker.close()
+
+    assert engine.stop_calls == 0
+    assert engine.completed == ["First response.", "Second response."]
 
 
 @pytest.mark.asyncio

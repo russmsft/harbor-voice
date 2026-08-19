@@ -6,6 +6,7 @@ import asyncio
 import queue
 import re
 import threading
+import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
@@ -58,6 +59,7 @@ class SapiSpeaker:
         self._generation = 0
         self._generation_lock = threading.Lock()
         self._engine = None
+        self._speaking = False
         self._startup_error: Exception | None = None
         self._startup_ready = threading.Event()
         self._closed = False
@@ -80,9 +82,6 @@ class SapiSpeaker:
     def cancel(self) -> None:
         with self._generation_lock:
             self._generation += 1
-        engine = self._engine
-        if engine is not None:
-            engine.stop()
 
     async def close(self) -> None:
         if self._closed:
@@ -111,13 +110,34 @@ class SapiSpeaker:
             if command.generation != self._current_generation():
                 command.loop.call_soon_threadsafe(self._resolve, command.future, None)
                 continue
+            with self._generation_lock:
+                if command.generation != self._generation:
+                    command.loop.call_soon_threadsafe(self._resolve, command.future, None)
+                    continue
+                self._speaking = True
             try:
-                self._engine.say(command.text)
-                self._engine.runAndWait()
+                self._speak_command(command)
             except Exception as exc:
                 command.loop.call_soon_threadsafe(self._resolve, command.future, exc)
             else:
                 command.loop.call_soon_threadsafe(self._resolve, command.future, None)
+            finally:
+                with self._generation_lock:
+                    self._speaking = False
+
+    def _speak_command(self, command: _SpeechCommand) -> None:
+        self._engine.say(command.text)
+        self._engine.startLoop(False)
+        try:
+            while True:
+                self._engine.iterate()
+                if command.generation != self._current_generation():
+                    self._engine.stop()
+                if not self._engine.isBusy():
+                    return
+                time.sleep(0.01)
+        finally:
+            self._engine.endLoop()
 
     @staticmethod
     def _resolve(future: asyncio.Future[None], error: Exception | None) -> None:

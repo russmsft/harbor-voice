@@ -30,6 +30,7 @@ from harbor_voice.backends.transcription import FasterWhisperTranscriber
 from harbor_voice.coordinator import TurnCoordinator
 from harbor_voice.domain import ActionKind, AppState
 from harbor_voice.policy import PermissionPolicy
+from harbor_voice.startup import StartupRegistration
 from harbor_voice.storage import (
     AppPaths,
     AssistantSettings,
@@ -38,7 +39,6 @@ from harbor_voice.storage import (
     SettingsStore,
     configure_logging,
 )
-from harbor_voice.startup import StartupRegistration
 from harbor_voice.ui.tray import SingleInstanceGuard, TrayController
 from harbor_voice.ui.window import ApprovalDialog, ConversationWindow, SettingsDialog
 
@@ -491,12 +491,10 @@ def main() -> int:
     settings_store = SettingsStore(paths.settings)
     startup_registration = StartupRegistration()
     settings = settings_store.load()
-    try:
+    with suppress(OSError):
         settings = settings.model_copy(
             update={"launch_at_login": startup_registration.is_enabled()}
         )
-    except OSError:
-        pass
     settings = _choose_initial_workspace(settings)
     if settings is None:
         return 1
