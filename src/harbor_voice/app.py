@@ -37,6 +37,7 @@ from harbor_voice.storage import (
     SettingsStore,
     configure_logging,
 )
+from harbor_voice.startup import StartupRegistration
 from harbor_voice.ui.tray import SingleInstanceGuard, TrayController
 from harbor_voice.ui.window import ApprovalDialog, ConversationWindow, SettingsDialog
 
@@ -55,6 +56,31 @@ class ComponentGraph:
     policy: PermissionPolicy
     coordinator: TurnCoordinator
     providers: ProviderBundle
+
+
+class SettingsApplyError(RuntimeError):
+    """Settings and launch registration could not be kept consistent."""
+
+
+def persist_settings(
+    settings: AssistantSettings,
+    settings_store: SettingsStore,
+    startup_registration: StartupRegistration,
+) -> None:
+    previous_startup = startup_registration.configured_entry()
+    startup_changed = startup_registration.set_enabled(settings.launch_at_login)
+    try:
+        settings_store.save(settings)
+    except (OSError, RuntimeError) as exc:
+        if startup_changed:
+            try:
+                startup_registration.restore(previous_startup)
+            except (OSError, RuntimeError) as rollback_error:
+                raise SettingsApplyError(
+                    "settings save failed and launch-at-login rollback failed: "
+                    f"{rollback_error}"
+                ) from exc
+        raise
 
 
 def build_components(
@@ -134,6 +160,7 @@ class HarborRuntime:
         tray: TrayController | None = None,
         window: ConversationWindow | None = None,
         guard: SingleInstanceGuard | None = None,
+        startup_registration: StartupRegistration | None = None,
     ) -> None:
         self.application = application
         self.loop = loop
@@ -144,6 +171,7 @@ class HarborRuntime:
         self.tray = tray or TrayController()
         self.window = window or ConversationWindow()
         self.guard = guard or SingleInstanceGuard(paths.root / "instance.lock")
+        self.startup_registration = startup_registration or StartupRegistration()
         self.history_store = HistoryStore(paths.history, settings.retention)
         self.graph = build_components(
             settings,
@@ -159,6 +187,7 @@ class HarborRuntime:
         )
         self._approval_dialog: ApprovalDialog | None = None
         self._operation_task: asyncio.Task[None] | None = None
+        self._shutdown_task: asyncio.Task[None] | None = None
         self._recording = False
         self._operation_state = AppState.IDLE
         self._muted = False
@@ -177,7 +206,7 @@ class HarborRuntime:
         return True
 
     def handle_press(self) -> None:
-        if self._muted or self._recording:
+        if self._closed or self._muted or self._recording:
             return
         active = self._operation_task
         if active is not None and not active.done():
@@ -187,16 +216,24 @@ class HarborRuntime:
         elif self._operation_state not in {AppState.IDLE, AppState.ERROR}:
             return
         self.graph.coordinator.cancel_speech()
-        self.providers.recorder.start()
+        try:
+            self.providers.recorder.start()
+        except Exception as exc:
+            self.graph.coordinator.report_error(exc)
+            return
         self._recording = True
         self._set_state(AppState.LISTENING)
 
     def handle_release(self) -> asyncio.Task[None]:
         loop = self._running_loop()
-        if not self._recording:
+        if self._closed or not self._recording:
             return loop.create_task(self._nothing())
         self._recording = False
-        recording = self.providers.recorder.stop()
+        try:
+            recording = self.providers.recorder.stop()
+        except Exception as exc:
+            self.graph.coordinator.report_error(exc)
+            return loop.create_task(self._nothing())
         if recording is None:
             self._set_state(AppState.IDLE)
             return loop.create_task(self._nothing())
@@ -204,20 +241,55 @@ class HarborRuntime:
         return self._start_operation(self._submit_after(previous, recording))
 
     async def shutdown(self) -> None:
-        if self._closed:
-            return
-        self._closed = True
-        self._hotkey.stop()
-        self.providers.recorder.close()
+        task = self._shutdown_task
+        if task is None:
+            self._closed = True
+            self._recording = False
+            task = self._running_loop().create_task(self._shutdown())
+            self._shutdown_task = task
+        await asyncio.shield(task)
+
+    async def _shutdown(self) -> None:
+        errors: list[Exception] = []
+        dialog = self._approval_dialog
+        if dialog is not None:
+            dialog.reject()
+        try:
+            self._hotkey.stop()
+        except Exception as exc:
+            errors.append(exc)
+        try:
+            self.providers.recorder.close()
+        except Exception as exc:
+            errors.append(exc)
         active = self._operation_task
         if active is not None and not active.done():
             active.cancel()
-            with suppress(asyncio.CancelledError):
-                await active
-        await self.providers.speaker.close()
-        await self.providers.backend.close()
-        self.tray.hide()
-        self.guard.release()
+            try:
+                with suppress(asyncio.CancelledError):
+                    await active
+            except Exception as exc:
+                errors.append(exc)
+        try:
+            await self.providers.speaker.close()
+        except Exception as exc:
+            errors.append(exc)
+        try:
+            await self.providers.backend.close()
+        except Exception as exc:
+            errors.append(exc)
+        try:
+            self.tray.hide()
+        except Exception as exc:
+            errors.append(exc)
+        try:
+            self.guard.release()
+        except Exception as exc:
+            errors.append(exc)
+        if errors:
+            raise RuntimeError(
+                f"shutdown completed with {len(errors)} cleanup error(s): {errors[0]}"
+            ) from errors[0]
 
     async def _submit(self, recording) -> None:
         await self.graph.coordinator.submit(recording)
@@ -240,23 +312,46 @@ class HarborRuntime:
         self._render_state()
         if state is AppState.APPROVAL and self.graph.coordinator.pending is not None:
             self._show_approval()
+        elif state is AppState.ERROR and self.graph.coordinator.last_error:
+            self.window.set_error(self.graph.coordinator.last_error)
 
     def _show_approval(self) -> None:
         pending = self.graph.coordinator.pending
         if pending is None:
             return
-        dialog = ApprovalDialog(pending.action, self.window)
-        dialog.approved.connect(self._approve)
-        dialog.rejected.connect(self._reject)
+        dialog = ApprovalDialog(
+            pending.action,
+            self.window,
+            display_target=pending.display_target,
+        )
+        dialog.action_approved.connect(self._approve)
+        dialog.action_rejected.connect(self._reject)
+        dialog.action_expired.connect(self._expire)
         self._approval_dialog = dialog
         dialog.show()
         dialog.raise_()
 
     def _approve(self, action_id) -> None:
+        if self._closed:
+            self._reject(action_id)
+            return
+        self._forget_approval_dialog(action_id)
         self._start_operation(self.graph.coordinator.approve(action_id))
 
     def _reject(self, action_id) -> None:
-        self.graph.coordinator.reject(action_id)
+        self._forget_approval_dialog(action_id)
+        pending = self.graph.coordinator.pending
+        if pending is not None and pending.action.id == action_id:
+            self.graph.coordinator.reject(action_id)
+
+    def _expire(self, action_id) -> None:
+        self._reject(action_id)
+        self.tray.notify("Harbor Voice", "The pending approval expired.")
+
+    def _forget_approval_dialog(self, action_id) -> None:
+        dialog = self._approval_dialog
+        if dialog is not None and dialog.action_id == action_id:
+            self._approval_dialog = None
 
     def _wire_ui(self) -> None:
         self._bridge.pressed.connect(self.handle_press)
@@ -277,17 +372,32 @@ class HarborRuntime:
         self._render_state()
 
     def _show_settings(self) -> None:
+        if self._closed:
+            return
         dialog = SettingsDialog(self.settings, self.window)
-
-        def save(settings: AssistantSettings) -> None:
-            self.settings_store.save(settings)
-            self.settings = settings
-            self.tray.notify("Harbor Voice", "Settings saved. Restart to apply these changes.")
-
-        dialog.saved.connect(save)
+        dialog.saved.connect(self._save_settings)
         dialog.show()
 
+    def _save_settings(self, settings: AssistantSettings) -> None:
+        if self._closed:
+            return
+        try:
+            persist_settings(settings, self.settings_store, self.startup_registration)
+        except (OSError, RuntimeError) as exc:
+            self.tray.notify("Harbor Voice", f"Settings could not be saved: {exc}")
+            return
+        self.settings = settings
+        self.tray.notify(
+            "Harbor Voice",
+            "Settings saved. Restart to apply audio, shortcut, or workspace changes.",
+        )
+
     def _new_conversation(self) -> None:
+        if self._closed:
+            return
+        dialog = self._approval_dialog
+        if dialog is not None:
+            dialog.reject()
         active = self._operation_task
         if active is not None and not active.done():
             self.graph.coordinator.cancel_speech()
@@ -297,8 +407,12 @@ class HarborRuntime:
 
     def _quit(self) -> None:
         async def finish() -> None:
-            await self.shutdown()
-            self.application.quit()
+            try:
+                await self.shutdown()
+            except Exception as exc:
+                self.graph.coordinator.report_error(exc)
+            finally:
+                self.application.quit()
 
         self._running_loop().create_task(finish())
 
@@ -311,7 +425,17 @@ class HarborRuntime:
     def _start_operation(self, operation: Coroutine[Any, Any, None]) -> asyncio.Task[None]:
         task = self._running_loop().create_task(operation)
         self._operation_task = task
+        task.add_done_callback(self._operation_finished)
         return task
+
+    def _operation_finished(self, task: asyncio.Task[None]) -> None:
+        if self._operation_task is task:
+            self._operation_task = None
+        if task.cancelled():
+            return
+        error = task.exception()
+        if error is not None:
+            self.graph.coordinator.report_error(error)
 
     def _render_state(self) -> None:
         visible = AppState.MUTED if self._muted else self._operation_state
@@ -359,10 +483,22 @@ def main() -> int:
     paths = AppPaths.from_root(Path(user_data_path("HarborVoice")))
     paths.ensure_owned_root()
     settings_store = SettingsStore(paths.settings)
-    settings = _choose_initial_workspace(settings_store.load())
+    startup_registration = StartupRegistration()
+    settings = settings_store.load()
+    try:
+        settings = settings.model_copy(
+            update={"launch_at_login": startup_registration.is_enabled()}
+        )
+    except OSError:
+        pass
+    settings = _choose_initial_workspace(settings)
     if settings is None:
         return 1
-    settings_store.save(settings)
+    try:
+        persist_settings(settings, settings_store, startup_registration)
+    except (OSError, RuntimeError) as exc:
+        print(f"Launch-at-login could not be configured: {exc}", file=sys.stderr)
+        return 1
     configure_logging(paths)
     loop = qasync.QEventLoop(application)
     asyncio.set_event_loop(loop)
@@ -373,13 +509,18 @@ def main() -> int:
         settings=settings,
         settings_store=settings_store,
         providers=default_providers(settings, application),
+        startup_registration=startup_registration,
     )
     with loop:
         started = loop.run_until_complete(runtime.start())
         if not started:
             return 2
         loop.run_forever()
-        loop.run_until_complete(runtime.shutdown())
+        try:
+            loop.run_until_complete(runtime.shutdown())
+        except RuntimeError as exc:
+            print(f"Harbor Voice shutdown completed with errors: {exc}", file=sys.stderr)
+            return 3
     return 0
 
 

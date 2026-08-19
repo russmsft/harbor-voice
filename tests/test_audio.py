@@ -31,6 +31,11 @@ class FakeStream:
         self.callback(data, len(data) // 2, None, None)
 
 
+class FailingStartStream(FakeStream):
+    def start(self) -> None:
+        raise RuntimeError("microphone busy")
+
+
 class FakeStreamFactory:
     def __init__(self) -> None:
         self.stream: FakeStream | None = None
@@ -92,6 +97,27 @@ def test_recorder_rejects_overlapping_capture() -> None:
         recorder.start()
 
 
+def test_failed_start_closes_stream_and_allows_retry() -> None:
+    streams: list[FakeStream] = []
+
+    def factory(*, callback, **kwargs) -> FakeStream:
+        del kwargs
+        stream = FailingStartStream(callback) if not streams else FakeStream(callback)
+        streams.append(stream)
+        return stream
+
+    recorder = MemoryRecorder(factory)
+
+    with pytest.raises(RuntimeError, match="microphone busy"):
+        recorder.start()
+
+    assert recorder.active is False
+    assert streams[0].closed is True
+    recorder.start()
+    assert recorder.active is True
+    recorder.stop()
+
+
 class FakeListener:
     def __init__(self, on_press, on_release) -> None:
         self.on_press = on_press
@@ -141,4 +167,3 @@ def test_hotkey_ignores_other_keys() -> None:
     created[0].on_release("f8")
 
     assert events == []
-

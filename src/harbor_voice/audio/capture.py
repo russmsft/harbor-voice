@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import threading
 from collections.abc import Callable
+from contextlib import suppress
 from typing import Any
 
 from harbor_voice.domain import AudioRecording
@@ -50,18 +51,27 @@ class MemoryRecorder:
             device=self.device,
             callback=self._on_audio,
         )
+        try:
+            stream.start()
+        except Exception:
+            with suppress(Exception):
+                stream.close()
+            raise
         self._stream = stream
-        stream.start()
 
     def stop(self) -> AudioRecording | None:
         stream, self._stream = self._stream, None
         if stream is None:
             return None
-        stream.stop()
-        stream.close()
-        with self._lock:
-            pcm = bytes(self._pcm)
-            self._pcm.clear()
+        try:
+            stream.stop()
+        finally:
+            try:
+                stream.close()
+            finally:
+                with self._lock:
+                    pcm = bytes(self._pcm)
+                    self._pcm.clear()
         duration_ms = len(pcm) * 1_000 // (16_000 * 2)
         if duration_ms < self.min_duration_ms:
             return None
@@ -75,4 +85,3 @@ class MemoryRecorder:
         del frames, time_info, status
         with self._lock:
             self._pcm.extend(bytes(indata))
-

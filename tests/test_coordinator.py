@@ -16,7 +16,7 @@ from harbor_voice.domain import (
     ProposalResponse,
     Transcript,
 )
-from harbor_voice.policy import PermissionPolicy
+from harbor_voice.policy import Disposition, PermissionPolicy, PolicyDecision
 from tests.fakes import FakeBackend, FakeRunner, FakeSpeaker, FakeTranscriber, sample_recording
 
 
@@ -104,6 +104,44 @@ async def test_confirmation_has_no_effect_before_approval(rig: Rig) -> None:
     assert rig.runner.executed == []
     assert rig.coordinator.pending is not None
     assert rig.states[-1] is AppState.APPROVAL
+
+
+@pytest.mark.asyncio
+async def test_pending_approval_carries_policy_normalized_target(rig: Rig) -> None:
+    rig.backend.response = proposed(ActionKind.OPEN_URL, "HTTPS://Example.COM/private")
+
+    await rig.coordinator.submit(sample_recording())
+
+    assert rig.coordinator.pending is not None
+    assert rig.coordinator.pending.display_target == "https://Example.COM/private"
+
+
+@pytest.mark.asyncio
+async def test_approval_executes_policy_normalized_target(rig: Rig) -> None:
+    rig.backend.response = proposed(ActionKind.OPEN_URL, "HTTPS://Example.COM/private")
+    await rig.coordinator.submit(sample_recording())
+
+    await rig.coordinator.approve(rig.coordinator.pending.action.id)
+
+    assert rig.runner.executed[0].target == "https://Example.COM/private"
+
+
+@pytest.mark.asyncio
+async def test_changed_target_invalidates_pending_approval(rig: Rig) -> None:
+    rig.backend.response = proposed(ActionKind.OPEN_URL, "https://example.com/original")
+    await rig.coordinator.submit(sample_recording())
+    action_id = rig.coordinator.pending.action.id
+    rig.coordinator._policy.revalidate = lambda *args, **kwargs: PolicyDecision(
+        Disposition.CONFIRM,
+        "confirmation_required",
+        "https://example.com/changed",
+    )
+
+    with pytest.raises(ApprovalExpired, match="approval_target_changed"):
+        await rig.coordinator.approve(action_id)
+
+    assert rig.runner.executed == []
+    assert rig.coordinator.pending is None
 
 
 @pytest.mark.asyncio

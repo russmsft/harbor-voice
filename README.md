@@ -7,7 +7,7 @@
 <p align="center">
   <img alt="Windows 10 and 11" src="https://img.shields.io/badge/Windows-10%20%7C%2011-38bdf8">
   <img alt="Python 3.11 and 3.12" src="https://img.shields.io/badge/Python-3.11%20%7C%203.12-818cf8">
-  <img alt="120 automated tests" src="https://img.shields.io/badge/tests-120-2dd4bf">
+  <img alt="142 automated tests" src="https://img.shields.io/badge/tests-142-2dd4bf">
   <a href="LICENSE"><img alt="MIT licence" src="https://img.shields.io/badge/license-MIT-fbbf24"></a>
 </p>
 
@@ -168,6 +168,9 @@ Launch-at-login is off by default. Enable it explicitly when installing:
 ```powershell
 .\packaging\install.ps1 -Source .\dist\HarborVoice -EnableLaunchAtLogin
 ```
+
+The same preference can be changed later in Settings; the Windows sign-in registration is
+updated immediately when settings are saved.
 
 Uninstall while preserving settings and transcript history:
 

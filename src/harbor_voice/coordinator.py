@@ -10,6 +10,7 @@ from typing import Literal
 from uuid import UUID
 
 from harbor_voice.domain import (
+    ActionKind,
     ActionProposal,
     AppState,
     AssistantRequest,
@@ -37,6 +38,7 @@ class TurnBusy(RuntimeError):
 class PendingApproval:
     action: ActionProposal
     created_at: float
+    display_target: str
 
 
 class TurnCoordinator:
@@ -123,9 +125,20 @@ class TurnCoordinator:
                 self._publish(AppState.IDLE)
                 raise ApprovalExpired(decision.reason)
 
+            current_target = decision.normalized_target or pending.action.target
+            if current_target != pending.display_target:
+                self._pending = None
+                self._publish(AppState.IDLE)
+                raise ApprovalExpired("approval_target_changed")
+
             self._pending = None
+            execution_action = pending.action
+            if pending.action.kind in {ActionKind.FILE_WRITE, ActionKind.OPEN_URL}:
+                execution_action = pending.action.model_copy(
+                    update={"target": pending.display_target}
+                )
             try:
-                await self._execute(pending.action)
+                await self._execute(execution_action)
             except Exception as exc:
                 self._fail(exc)
 
@@ -153,6 +166,10 @@ class TurnCoordinator:
         self.last_error = None
         self._publish(AppState.IDLE)
 
+    def report_error(self, error: Exception) -> None:
+        """Expose a recoverable provider or UI-boundary failure."""
+        self._fail(error)
+
     async def _handle_proposal(self, response: ProposalResponse) -> None:
         decision = self._policy.evaluate(response.action, now=self._clock())
         if decision.disposition is Disposition.BLOCK:
@@ -162,7 +179,11 @@ class TurnCoordinator:
         if decision.disposition is Disposition.AUTO:
             await self._execute(response.action)
             return
-        self._pending = PendingApproval(response.action, self._clock())
+        self._pending = PendingApproval(
+            response.action,
+            self._clock(),
+            decision.normalized_target or response.action.target,
+        )
         self._publish(AppState.APPROVAL)
 
     async def _execute(self, action: ActionProposal) -> None:

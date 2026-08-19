@@ -50,7 +50,7 @@ def test_approval_dialog_emits_matching_identifier(qtbot: QtBot) -> None:
     dialog = ApprovalDialog(proposal())
     qtbot.addWidget(dialog)
     received: list[UUID] = []
-    dialog.approved.connect(received.append)
+    dialog.action_approved.connect(received.append)
 
     qtbot.mouseClick(dialog.approve_button, Qt.MouseButton.LeftButton)
 
@@ -60,11 +60,50 @@ def test_approval_dialog_emits_matching_identifier(qtbot: QtBot) -> None:
 def test_expired_approval_disables_execution(qtbot: QtBot) -> None:
     dialog = ApprovalDialog(proposal())
     qtbot.addWidget(dialog)
+    received: list[UUID] = []
+    dialog.action_expired.connect(received.append)
 
     dialog.expire()
 
     assert not dialog.approve_button.isEnabled()
     assert "expired" in dialog.status_label.text().casefold()
+    assert received == [proposal().id]
+
+
+def test_closing_approval_rejects_matching_action(qtbot: QtBot) -> None:
+    dialog = ApprovalDialog(proposal())
+    qtbot.addWidget(dialog)
+    received: list[UUID] = []
+    dialog.action_rejected.connect(received.append)
+
+    dialog.reject()
+
+    assert received == [proposal().id]
+
+
+def test_approval_dialog_uses_authoritative_target(qtbot: QtBot) -> None:
+    dialog = ApprovalDialog(
+        proposal(),
+        display_target="C:\\Program Files\\Browser\\browser.exe",
+    )
+    qtbot.addWidget(dialog)
+
+    assert dialog.target_label.text() == "C:\\Program Files\\Browser\\browser.exe"
+
+
+def test_clipboard_approval_shows_length_and_preview(qtbot: QtBot) -> None:
+    action = ActionProposal(
+        id=proposal().id,
+        kind=ActionKind.CLIPBOARD_REPLACE,
+        target="clipboard",
+        summary="Replace clipboard",
+        payload={"text": "private replacement"},
+    )
+    dialog = ApprovalDialog(action)
+    qtbot.addWidget(dialog)
+
+    assert "19 characters" in dialog.effect_label.text()
+    assert "private replacement" in dialog.effect_label.text()
 
 
 def test_approval_dialog_starts_five_minute_expiry_timer(qtbot: QtBot) -> None:
@@ -74,6 +113,7 @@ def test_approval_dialog_starts_five_minute_expiry_timer(qtbot: QtBot) -> None:
     assert dialog.expiry_timer.isSingleShot()
     assert dialog.expiry_timer.interval() == 300_000
     assert dialog.expiry_timer.isActive()
+    assert dialog.testAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
 
 
 def test_close_hides_conversation_without_quitting(qtbot: QtBot) -> None:

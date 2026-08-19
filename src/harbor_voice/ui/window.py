@@ -6,7 +6,7 @@ from pathlib import Path
 from uuid import UUID
 
 from pydantic import ValidationError
-from PySide6.QtCore import QTimer, Signal
+from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -22,7 +22,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from harbor_voice.domain import ActionProposal, AppState
+from harbor_voice.domain import ActionKind, ActionProposal, AppState
 from harbor_voice.storage import AssistantSettings, Retention
 
 
@@ -61,38 +61,63 @@ class ConversationWindow(QMainWindow):
         self.transcript_text.setPlainText(transcript)
         self.response_text.setPlainText(response)
 
+    def set_error(self, message: str) -> None:
+        self.response_text.setPlainText(f"Error: {message}")
+
     def closeEvent(self, event) -> None:
         self.hide()
         event.ignore()
 
 
 class ApprovalDialog(QDialog):
-    approved = Signal(object)
-    rejected = Signal(object)
+    action_approved = Signal(object)
+    action_rejected = Signal(object)
+    action_expired = Signal(object)
 
-    def __init__(self, action: ActionProposal, parent: QWidget | None = None) -> None:
+    def __init__(
+        self,
+        action: ActionProposal,
+        parent: QWidget | None = None,
+        *,
+        display_target: str | None = None,
+    ) -> None:
         super().__init__(parent)
         self.action_id: UUID = action.id
+        self._resolved = False
+        self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
         self.setWindowTitle("Approve Harbor Voice action")
         layout = QVBoxLayout(self)
         layout.addWidget(QLabel("Harbor Voice is requesting permission:"))
+        self.kind_label = QLabel(action.kind.value.replace("_", " ").title())
         self.summary_label = QLabel(action.summary)
+        self.summary_label.setTextFormat(Qt.TextFormat.PlainText)
         self.summary_label.setWordWrap(True)
-        self.target_label = QLabel(action.target)
-        self.target_label.setTextInteractionFlags(self.target_label.textInteractionFlags())
+        self.target_label = QLabel(display_target or action.target)
+        self.target_label.setTextFormat(Qt.TextFormat.PlainText)
+        self.target_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         self.target_label.setWordWrap(True)
+        self.effect_label = QLabel(self._describe_effect(action))
+        self.effect_label.setTextFormat(Qt.TextFormat.PlainText)
+        self.effect_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        self.effect_label.setWordWrap(True)
         self.status_label = QLabel("Approval expires after five minutes.")
         self.approve_button = QPushButton("Approve once")
         self.reject_button = QPushButton("Reject")
         buttons = QDialogButtonBox()
         buttons.addButton(self.approve_button, QDialogButtonBox.ButtonRole.AcceptRole)
         buttons.addButton(self.reject_button, QDialogButtonBox.ButtonRole.RejectRole)
+        layout.addWidget(QLabel("Action"))
+        layout.addWidget(self.kind_label)
+        layout.addWidget(QLabel("Assistant summary"))
         layout.addWidget(self.summary_label)
+        layout.addWidget(QLabel("Authoritative target"))
         layout.addWidget(self.target_label)
+        layout.addWidget(QLabel("Effect"))
+        layout.addWidget(self.effect_label)
         layout.addWidget(self.status_label)
         layout.addWidget(buttons)
         self.approve_button.clicked.connect(self._approve)
-        self.reject_button.clicked.connect(self._reject)
+        self.reject_button.clicked.connect(self.reject)
         self.expiry_timer = QTimer(self)
         self.expiry_timer.setSingleShot(True)
         self.expiry_timer.setInterval(300_000)
@@ -100,16 +125,47 @@ class ApprovalDialog(QDialog):
         self.expiry_timer.start()
 
     def expire(self) -> None:
+        if self._resolved:
+            return
+        self._resolved = True
         self.approve_button.setEnabled(False)
         self.status_label.setText("This approval has expired.")
+        self.action_expired.emit(self.action_id)
+        super().reject()
 
     def _approve(self) -> None:
-        self.approved.emit(self.action_id)
-        self.accept()
+        if self._resolved:
+            return
+        self._resolved = True
+        self.action_approved.emit(self.action_id)
+        super().accept()
 
-    def _reject(self) -> None:
-        self.rejected.emit(self.action_id)
-        self.reject()
+    def reject(self) -> None:
+        if not self._resolved:
+            self._resolved = True
+            self.action_rejected.emit(self.action_id)
+        super().reject()
+
+    @staticmethod
+    def _describe_effect(action: ActionProposal) -> str:
+        if action.kind is ActionKind.FILE_WRITE:
+            content = action.payload.get("content", "")
+            preview = content[:500]
+            suffix = "\n[preview truncated]" if len(content) > len(preview) else ""
+            return (
+                f"Create or replace one file with {len(content)} UTF-8 characters:\n"
+                f"{preview}{suffix}"
+            )
+        if action.kind is ActionKind.CLIPBOARD_REPLACE:
+            text = action.payload.get("text", "")
+            preview = text[:500]
+            suffix = "\n[preview truncated]" if len(text) > len(preview) else ""
+            return f"Replace the clipboard with {len(text)} characters:\n{preview}{suffix}"
+        if action.kind is ActionKind.OPEN_APP:
+            return "Launch the registered executable shown above without command-line arguments."
+        if action.kind is ActionKind.OPEN_URL:
+            return "Open the HTTPS URL shown above in the default browser."
+        return "Perform the typed action shown above."
 
 
 class SettingsDialog(QDialog):
