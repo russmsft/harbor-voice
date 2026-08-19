@@ -672,6 +672,8 @@ class CopilotCliBackend:
             "--disallow-temp-dir",
             "--stream",
             "off",
+            "--output-format",
+            "json",
             "--log-level",
             "none",
             "--available-tools",
@@ -744,6 +746,22 @@ class CopilotCliBackend:
 
 def _extract_response_json(raw: str) -> str:
     text = raw.strip()
+    for line in reversed(text.splitlines()):
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(event, dict):
+            continue
+        if event.get("type") != "assistant.message":
+            continue
+        data = event.get("data")
+        if not isinstance(data, dict):
+            continue
+        content = data.get("content")
+        if isinstance(content, str):
+            text = content.strip()
+            break
     if text.startswith("```") and text.endswith("```"):
         lines = text.splitlines()
         if len(lines) >= 3:

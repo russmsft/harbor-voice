@@ -68,6 +68,7 @@ async def test_normal_turn_exposes_only_workspace_read_tools(tmp_path: Path) -> 
     assert arguments[arguments.index("--available-tools") + 1] == "view,grep,glob"
     assert "--disable-builtin-mcps" in arguments
     assert "--disallow-temp-dir" in arguments
+    assert arguments[arguments.index("--output-format") + 1] == "json"
     assert "--allow-all-urls" not in arguments
     assert not {"bash", "edit", "write", "shell"} & set(arguments)
     assert environment["COPILOT_HOME"] == str((tmp_path / "copilot-home").resolve())
@@ -228,6 +229,68 @@ async def test_fenced_json_is_accepted_without_relaxing_schema(tmp_path: Path) -
     response = await provider.ask(AssistantRequest(text="hello"))
 
     assert response == MessageResponse(kind="message", message="Hello")
+
+
+@pytest.mark.asyncio
+async def test_jsonl_output_uses_unwrapped_assistant_content(tmp_path: Path) -> None:
+    fake = FakeCli()
+    content = json.dumps(
+        {
+            "kind": "message",
+            "message": (
+                "This long response remains valid because JSONL carries the assistant "
+                "content without terminal line wrapping inside its JSON string."
+            ),
+        }
+    )
+    fake.result = CliResult(
+        0,
+        "\n".join(
+            [
+                json.dumps({"type": "assistant.turn_start", "data": {"turnId": "1"}}),
+                json.dumps(
+                    {
+                        "type": "assistant.message",
+                        "data": {"content": content},
+                    }
+                ),
+                json.dumps({"type": "result", "data": {}}),
+            ]
+        ),
+        "",
+    )
+    provider = backend(tmp_path, fake)
+    await provider.start(tmp_path)
+
+    response = await provider.ask(AssistantRequest(text="hello"))
+
+    assert isinstance(response, MessageResponse)
+    assert response.message.startswith("This long response remains valid")
+
+
+@pytest.mark.parametrize(
+    "stdout",
+    [
+        "null",
+        "[]",
+        '"hello"',
+        '{"type":"assistant.message","data":null}',
+    ],
+)
+@pytest.mark.asyncio
+async def test_malformed_jsonl_cannot_bypass_safe_parse_failure(
+    tmp_path: Path,
+    stdout: str,
+) -> None:
+    fake = FakeCli()
+    fake.result = CliResult(0, stdout, "")
+    provider = backend(tmp_path, fake)
+    await provider.start(tmp_path)
+
+    response = await provider.ask(AssistantRequest(text="hello"))
+
+    assert isinstance(response, MessageResponse)
+    assert "safely interpret" in response.message
 
 
 def test_child_environment_drops_auth_and_prompt_customization_overrides(
