@@ -10,7 +10,11 @@ from uuid import UUID
 
 import pytest
 
-from harbor_voice.backends.copilot import CliResult, CopilotCliBackend, _run_cli
+from harbor_voice.backends.copilot import (
+    CopilotAcpConnection,
+    CopilotCliBackend,
+    _run_cli,
+)
 from harbor_voice.domain import (
     ActionKind,
     ActionProposal,
@@ -20,27 +24,253 @@ from harbor_voice.domain import (
 )
 
 
-class FakeCli:
+class FakeAcpConnection:
     def __init__(self) -> None:
-        self.result = CliResult(0, '{"kind":"message","message":"Hello"}', "")
+        self.response = '{"kind":"message","message":"Hello"}'
+        self.error: Exception | None = None
+        self.started = False
+        self.closed = False
+        self.block_start = False
+        self.start_release = asyncio.Event()
+        self.sessions: list[Path] = []
+        self.new_session_calls = 0
+        self.new_session_error_at: int | None = None
+        self.prompts: list[tuple[str, str]] = []
+        self.cancelled: list[str] = []
+        self.cancel_error: Exception | None = None
+        self.block_prompts = False
+        self.prompt_started = asyncio.Event()
+        self.prompt_release = asyncio.Event()
+
+    async def start(self) -> None:
+        self.started = True
+        if self.block_start:
+            await self.start_release.wait()
+
+    async def new_session(self, workspace: Path) -> str:
+        self.new_session_calls += 1
+        if self.new_session_error_at == self.new_session_calls:
+            raise RuntimeError("new session failed")
+        self.sessions.append(workspace)
+        return f"session-{len(self.sessions)}"
+
+    async def prompt(self, session_id: str, text: str) -> str:
+        self.prompts.append((session_id, text))
+        self.prompt_started.set()
+        if self.block_prompts:
+            await self.prompt_release.wait()
+        if self.error is not None:
+            raise self.error
+        return self.response
+
+    async def cancel(self, session_id: str) -> None:
+        self.cancelled.append(session_id)
+        if self.cancel_error is not None:
+            raise self.cancel_error
+        self.prompt_release.set()
+
+    async def close(self) -> None:
+        self.closed = True
+
+    async def abort(self) -> None:
+        self.closed = True
+        self.prompt_release.set()
+
+
+class FakeAcpFactory:
+    def __init__(self) -> None:
+        self.connection = FakeAcpConnection()
         self.calls: list[tuple[list[str], Path, dict[str, str]]] = []
 
-    async def __call__(
+    def __call__(
         self,
         arguments: list[str],
         cwd: Path,
         environment: dict[str, str],
-    ) -> CliResult:
+    ) -> FakeAcpConnection:
         self.calls.append((arguments, cwd, environment))
-        return self.result
+        return self.connection
 
 
-def backend(tmp_path: Path, fake: FakeCli) -> CopilotCliBackend:
+class ScriptedAcpProcess:
+    def __init__(self) -> None:
+        self.writes: list[dict] = []
+        self.responses: asyncio.Queue[str] = asyncio.Queue()
+        self.closed = asyncio.Event()
+        self.terminated = False
+
+    async def write_line(self, line: str) -> None:
+        message = json.loads(line)
+        self.writes.append(message)
+        method = message.get("method")
+        request_id = message.get("id")
+        if method == "initialize":
+            await self._respond(request_id, {"protocolVersion": 1})
+        elif method == "session/new":
+            await self._respond(request_id, {"sessionId": "session-1"})
+        elif method == "session/prompt":
+            await self.responses.put(
+                json.dumps(
+                    {
+                        "jsonrpc": "2.0",
+                        "id": 99,
+                        "method": "session/request_permission",
+                        "params": {
+                            "options": [
+                                {"optionId": "allow", "kind": "allow_once"},
+                                {"optionId": "reject", "kind": "reject_once"},
+                            ]
+                        },
+                    }
+                )
+                + "\n"
+            )
+            await self.responses.put(
+                json.dumps(
+                    {
+                        "jsonrpc": "2.0",
+                        "method": "session/update",
+                        "params": {
+                            "update": {
+                                "sessionUpdate": "agent_message_chunk",
+                                "content": {
+                                    "type": "text",
+                                    "text": "Working on it.",
+                                },
+                            }
+                        },
+                    }
+                )
+                + "\n"
+            )
+            await self.responses.put(
+                json.dumps(
+                    {
+                        "jsonrpc": "2.0",
+                        "method": "session/update",
+                        "params": {
+                            "update": {
+                                "sessionUpdate": "tool_call",
+                                "toolCallId": "tool-1",
+                                "title": "Read a file",
+                                "kind": "read",
+                                "status": "completed",
+                            }
+                        },
+                    }
+                )
+                + "\n"
+            )
+            await self.responses.put(
+                json.dumps(
+                    {
+                        "jsonrpc": "2.0",
+                        "method": "session/update",
+                        "params": {
+                            "update": {
+                                "sessionUpdate": "agent_message_chunk",
+                                "content": {
+                                    "type": "text",
+                                    "text": '{"kind":"message",',
+                                },
+                            }
+                        },
+                    }
+                )
+                + "\n"
+            )
+            await self.responses.put(
+                json.dumps(
+                    {
+                        "jsonrpc": "2.0",
+                        "method": "session/update",
+                        "params": {
+                            "update": {
+                                "sessionUpdate": "agent_message_chunk",
+                                "content": {
+                                    "type": "text",
+                                    "text": '"message":"Hello"}',
+                                },
+                            }
+                        },
+                    }
+                )
+                + "\n"
+            )
+            await self._respond(request_id, {"stopReason": "end_turn"})
+
+    async def _respond(self, request_id: int, result: dict) -> None:
+        await self.responses.put(
+            json.dumps({"jsonrpc": "2.0", "id": request_id, "result": result}) + "\n"
+        )
+
+    async def read_stdout_line(self) -> str:
+        return await self.responses.get()
+
+    async def read_stderr(self) -> str:
+        await self.closed.wait()
+        return ""
+
+    async def close_stdin(self) -> None:
+        self.closed.set()
+
+    async def wait(self) -> int:
+        return 0
+
+    def terminate(self) -> None:
+        self.terminated = True
+        self.closed.set()
+
+    def close(self) -> None:
+        self.closed.set()
+
+
+def backend(tmp_path: Path, fake: FakeAcpFactory) -> CopilotCliBackend:
     return CopilotCliBackend(
         copilot_home=tmp_path / "copilot-home",
         executable="copilot",
-        runner=fake,
+        connection_factory=fake,
     )
+
+
+@pytest.mark.asyncio
+async def test_acp_connection_reuses_session_and_denies_permission_requests(
+    tmp_path: Path,
+) -> None:
+    process = ScriptedAcpProcess()
+
+    async def process_factory(arguments, cwd, environment):
+        del arguments, cwd, environment
+        return process
+
+    connection = CopilotAcpConnection(
+        ["copilot", "--acp", "--stdio"],
+        tmp_path,
+        {},
+        process_factory=process_factory,
+    )
+
+    await connection.start()
+    session_id = await connection.new_session(tmp_path)
+    response = await connection.prompt(session_id, "hello")
+    await connection.close()
+
+    assert response == '{"kind":"message","message":"Hello"}'
+    assert [
+        message["method"]
+        for message in process.writes
+        if "method" in message
+    ] == [
+        "initialize",
+        "session/new",
+        "session/prompt",
+    ]
+    permission_response = next(
+        message for message in process.writes if message.get("id") == 99
+    )
+    assert permission_response["result"] == {
+        "outcome": {"outcome": "selected", "optionId": "reject"}
+    }
 
 
 def file_write(target: Path) -> ActionProposal:
@@ -55,7 +285,7 @@ def file_write(target: Path) -> ActionProposal:
 
 @pytest.mark.asyncio
 async def test_normal_turn_exposes_only_workspace_read_tools(tmp_path: Path) -> None:
-    fake = FakeCli()
+    fake = FakeAcpFactory()
     provider = backend(tmp_path, fake)
     await provider.start(tmp_path)
 
@@ -68,7 +298,9 @@ async def test_normal_turn_exposes_only_workspace_read_tools(tmp_path: Path) -> 
     assert arguments[arguments.index("--available-tools") + 1] == "view,grep,glob"
     assert "--disable-builtin-mcps" in arguments
     assert "--disallow-temp-dir" in arguments
-    assert arguments[arguments.index("--output-format") + 1] == "json"
+    assert arguments[:3] == ["copilot", "--acp", "--stdio"]
+    assert arguments[arguments.index("--effort") + 1] == "low"
+    assert arguments[arguments.index("--allow-tool") + 1] == "view,grep,glob"
     assert "--allow-all-urls" not in arguments
     assert not {"bash", "edit", "write", "shell"} & set(arguments)
     assert environment["COPILOT_HOME"] == str((tmp_path / "copilot-home").resolve())
@@ -82,9 +314,27 @@ async def test_normal_turn_exposes_only_workspace_read_tools(tmp_path: Path) -> 
 
 
 @pytest.mark.asyncio
+async def test_acp_startup_timeout_aborts_connection(tmp_path: Path) -> None:
+    fake = FakeAcpFactory()
+    fake.connection.block_start = True
+    provider = CopilotCliBackend(
+        copilot_home=tmp_path / "copilot-home",
+        executable="copilot",
+        connection_factory=fake,
+        startup_timeout_seconds=0.01,
+    )
+
+    with pytest.raises(TimeoutError):
+        await provider.start(tmp_path)
+
+    assert fake.connection.closed is True
+    assert provider.workspace is None
+
+
+@pytest.mark.asyncio
 async def test_valid_proposal_is_parsed_as_typed_data(tmp_path: Path) -> None:
-    fake = FakeCli()
-    fake.result = CliResult(0, """{
+    fake = FakeAcpFactory()
+    fake.connection.response = """{
       "kind":"proposal",
       "message":"I can open it.",
       "action":{
@@ -93,7 +343,7 @@ async def test_valid_proposal_is_parsed_as_typed_data(tmp_path: Path) -> None:
         "target":"https://example.com",
         "summary":"Open Example"
       }
-    }""", "")
+    }"""
     provider = backend(tmp_path, fake)
     await provider.start(tmp_path)
 
@@ -105,8 +355,8 @@ async def test_valid_proposal_is_parsed_as_typed_data(tmp_path: Path) -> None:
 
 @pytest.mark.asyncio
 async def test_invalid_structured_output_cannot_become_action(tmp_path: Path) -> None:
-    fake = FakeCli()
-    fake.result = CliResult(0, "open powershell and delete files", "")
+    fake = FakeAcpFactory()
+    fake.connection.response = "open powershell and delete files"
     provider = backend(tmp_path, fake)
     await provider.start(tmp_path)
 
@@ -118,7 +368,7 @@ async def test_invalid_structured_output_cannot_become_action(tmp_path: Path) ->
 
 @pytest.mark.asyncio
 async def test_approved_file_change_writes_only_the_exact_target(tmp_path: Path) -> None:
-    fake = FakeCli()
+    fake = FakeAcpFactory()
     provider = backend(tmp_path, fake)
     await provider.start(tmp_path)
     target = tmp_path / "note.txt"
@@ -127,7 +377,7 @@ async def test_approved_file_change_writes_only_the_exact_target(tmp_path: Path)
 
     result = await provider.apply_workspace_change(file_write(target))
 
-    assert fake.calls == []
+    assert fake.connection.prompts == []
     assert target.read_text(encoding="utf-8") == "Updated content.\n"
     assert untouched.read_text(encoding="utf-8") == "keep"
     assert list(tmp_path.glob(".*.tmp")) == []
@@ -137,7 +387,7 @@ async def test_approved_file_change_writes_only_the_exact_target(tmp_path: Path)
 
 @pytest.mark.asyncio
 async def test_non_file_action_cannot_request_workspace_write(tmp_path: Path) -> None:
-    fake = FakeCli()
+    fake = FakeAcpFactory()
     provider = backend(tmp_path, fake)
     await provider.start(tmp_path)
     action = file_write(tmp_path / "note.txt").model_copy(
@@ -147,26 +397,26 @@ async def test_non_file_action_cannot_request_workspace_write(tmp_path: Path) ->
     with pytest.raises(ValueError, match="file-write"):
         await provider.apply_workspace_change(action)
 
-    assert fake.calls == []
+    assert fake.connection.prompts == []
 
 
 @pytest.mark.asyncio
 async def test_outside_file_target_cannot_request_workspace_write(tmp_path: Path) -> None:
     workspace = tmp_path / "workspace"
     workspace.mkdir()
-    fake = FakeCli()
+    fake = FakeAcpFactory()
     provider = backend(tmp_path, fake)
     await provider.start(workspace)
 
     with pytest.raises(PermissionError, match="outside workspace"):
         await provider.apply_workspace_change(file_write(tmp_path / "secret.txt"))
 
-    assert fake.calls == []
+    assert fake.connection.prompts == []
 
 
 @pytest.mark.asyncio
 async def test_file_change_does_not_create_parent_directories(tmp_path: Path) -> None:
-    fake = FakeCli()
+    fake = FakeAcpFactory()
     provider = backend(tmp_path, fake)
     await provider.start(tmp_path)
     target = tmp_path / "new" / "sub" / "note.txt"
@@ -179,7 +429,7 @@ async def test_file_change_does_not_create_parent_directories(tmp_path: Path) ->
 
 @pytest.mark.asyncio
 async def test_reset_clears_in_memory_conversation_context(tmp_path: Path) -> None:
-    fake = FakeCli()
+    fake = FakeAcpFactory()
     provider = backend(tmp_path, fake)
     await provider.start(tmp_path)
     await provider.ask(AssistantRequest(text="Remember alpha"))
@@ -187,27 +437,29 @@ async def test_reset_clears_in_memory_conversation_context(tmp_path: Path) -> No
     await provider.reset()
     await provider.ask(AssistantRequest(text="What did I say?"))
 
-    second_prompt = fake.calls[1][0][fake.calls[1][0].index("-p") + 1]
+    assert fake.connection.sessions == [tmp_path.resolve(), tmp_path.resolve()]
+    second_prompt = fake.connection.prompts[1][1]
     assert "Remember alpha" not in second_prompt
 
 
 @pytest.mark.asyncio
 async def test_close_is_idempotent_and_prevents_new_turns(tmp_path: Path) -> None:
-    fake = FakeCli()
+    fake = FakeAcpFactory()
     provider = backend(tmp_path, fake)
     await provider.start(tmp_path)
 
     await provider.close()
     await provider.close()
 
+    assert fake.connection.closed is True
     with pytest.raises(RuntimeError, match="not started"):
         await provider.ask(AssistantRequest(text="hello"))
 
 
 @pytest.mark.asyncio
 async def test_cli_failure_is_reported_without_becoming_an_action(tmp_path: Path) -> None:
-    fake = FakeCli()
-    fake.result = CliResult(1, "", "authentication required")
+    fake = FakeAcpFactory()
+    fake.connection.error = RuntimeError("authentication required")
     provider = backend(tmp_path, fake)
     await provider.start(tmp_path)
 
@@ -216,12 +468,130 @@ async def test_cli_failure_is_reported_without_becoming_an_action(tmp_path: Path
 
 
 @pytest.mark.asyncio
+async def test_cancelled_turn_cancels_and_drains_persistent_session(tmp_path: Path) -> None:
+    fake = FakeAcpFactory()
+    fake.connection.block_prompts = True
+    provider = backend(tmp_path, fake)
+    await provider.start(tmp_path)
+    task = asyncio.create_task(provider.ask(AssistantRequest(text="hello")))
+    await fake.connection.prompt_started.wait()
+
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert fake.connection.cancelled == ["session-1"]
+    fake.connection.block_prompts = False
+    response = await provider.ask(AssistantRequest(text="fresh"))
+    assert response == MessageResponse(kind="message", message="Hello")
+
+
+@pytest.mark.asyncio
+async def test_failed_cancellation_restarts_persistent_connection(tmp_path: Path) -> None:
+    first = FakeAcpConnection()
+    first.block_prompts = True
+    first.cancel_error = RuntimeError("cancel failed")
+    second = FakeAcpConnection()
+    connections = iter([first, second])
+
+    def connection_factory(arguments, cwd, environment):
+        del arguments, cwd, environment
+        return next(connections)
+
+    provider = CopilotCliBackend(
+        copilot_home=tmp_path / "copilot-home",
+        executable="copilot",
+        connection_factory=connection_factory,
+    )
+    await provider.start(tmp_path)
+    task = asyncio.create_task(provider.ask(AssistantRequest(text="hello")))
+    await first.prompt_started.wait()
+
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert first.closed is True
+    assert second.started is False
+    await provider.reset()
+    assert second.started is True
+    response = await provider.ask(AssistantRequest(text="fresh"))
+    assert response == MessageResponse(kind="message", message="Hello")
+
+
+@pytest.mark.asyncio
+async def test_transport_failure_restarts_and_retries_current_turn(tmp_path: Path) -> None:
+    first = FakeAcpConnection()
+    second = FakeAcpConnection()
+    connections = iter([first, second])
+
+    def connection_factory(arguments, cwd, environment):
+        del arguments, cwd, environment
+        return next(connections)
+
+    provider = CopilotCliBackend(
+        copilot_home=tmp_path / "copilot-home",
+        executable="copilot",
+        connection_factory=connection_factory,
+    )
+    await provider.start(tmp_path)
+    await provider.ask(AssistantRequest(text="Remember alpha"))
+    first.error = RuntimeError("ACP closed unexpectedly")
+
+    response = await provider.ask(AssistantRequest(text="What did I say?"))
+
+    assert first.closed is True
+    assert second.started is True
+    assert response == MessageResponse(kind="message", message="Hello")
+    assert "Remember alpha" in second.prompts[0][1]
+
+
+@pytest.mark.asyncio
+async def test_failed_reset_reopens_blank_session(tmp_path: Path) -> None:
+    first = FakeAcpConnection()
+    first.new_session_error_at = 2
+    second = FakeAcpConnection()
+    connections = iter([first, second])
+
+    def connection_factory(arguments, cwd, environment):
+        del arguments, cwd, environment
+        return next(connections)
+
+    provider = CopilotCliBackend(
+        copilot_home=tmp_path / "copilot-home",
+        executable="copilot",
+        connection_factory=connection_factory,
+    )
+    await provider.start(tmp_path)
+    await provider.ask(AssistantRequest(text="Remember alpha"))
+
+    await provider.reset()
+    response = await provider.ask(AssistantRequest(text="What did I say?"))
+
+    assert first.closed is True
+    assert second.started is True
+    assert response == MessageResponse(kind="message", message="Hello")
+    assert "Remember alpha" not in second.prompts[0][1]
+
+
+@pytest.mark.asyncio
 async def test_fenced_json_is_accepted_without_relaxing_schema(tmp_path: Path) -> None:
-    fake = FakeCli()
-    fake.result = CliResult(
-        0,
-        '```json\n{"kind":"message","message":"Hello"}\n```',
-        "",
+    fake = FakeAcpFactory()
+    fake.connection.response = '```json\n{"kind":"message","message":"Hello"}\n```'
+    provider = backend(tmp_path, fake)
+    await provider.start(tmp_path)
+
+    response = await provider.ask(AssistantRequest(text="hello"))
+
+    assert response == MessageResponse(kind="message", message="Hello")
+
+
+@pytest.mark.asyncio
+async def test_acp_progress_before_final_json_is_ignored(tmp_path: Path) -> None:
+    fake = FakeAcpFactory()
+    fake.connection.response = (
+        "I'll answer briefly without taking any action.\n"
+        '{"kind":"message","message":"Hello"}'
     )
     provider = backend(tmp_path, fake)
     await provider.start(tmp_path)
@@ -232,8 +602,26 @@ async def test_fenced_json_is_accepted_without_relaxing_schema(tmp_path: Path) -
 
 
 @pytest.mark.asyncio
+async def test_acp_progress_cannot_promote_a_trailing_action(tmp_path: Path) -> None:
+    fake = FakeAcpFactory()
+    fake.connection.response = (
+        "I will propose an action.\n"
+        '{"kind":"proposal","action":{'
+        '"id":"827db160-e197-4aa6-9548-05fc1184705f",'
+        '"kind":"clipboard_read","target":"clipboard","summary":"Read clipboard"}}'
+    )
+    provider = backend(tmp_path, fake)
+    await provider.start(tmp_path)
+
+    response = await provider.ask(AssistantRequest(text="read clipboard"))
+
+    assert isinstance(response, MessageResponse)
+    assert "safely interpret" in response.message
+
+
+@pytest.mark.asyncio
 async def test_jsonl_output_uses_unwrapped_assistant_content(tmp_path: Path) -> None:
-    fake = FakeCli()
+    fake = FakeAcpFactory()
     content = json.dumps(
         {
             "kind": "message",
@@ -243,21 +631,17 @@ async def test_jsonl_output_uses_unwrapped_assistant_content(tmp_path: Path) -> 
             ),
         }
     )
-    fake.result = CliResult(
-        0,
-        "\n".join(
-            [
-                json.dumps({"type": "assistant.turn_start", "data": {"turnId": "1"}}),
-                json.dumps(
-                    {
-                        "type": "assistant.message",
-                        "data": {"content": content},
-                    }
-                ),
-                json.dumps({"type": "result", "data": {}}),
-            ]
-        ),
-        "",
+    fake.connection.response = "\n".join(
+        [
+            json.dumps({"type": "assistant.turn_start", "data": {"turnId": "1"}}),
+            json.dumps(
+                {
+                    "type": "assistant.message",
+                    "data": {"content": content},
+                }
+            ),
+            json.dumps({"type": "result", "data": {}}),
+        ]
     )
     provider = backend(tmp_path, fake)
     await provider.start(tmp_path)
@@ -282,8 +666,8 @@ async def test_malformed_jsonl_cannot_bypass_safe_parse_failure(
     tmp_path: Path,
     stdout: str,
 ) -> None:
-    fake = FakeCli()
-    fake.result = CliResult(0, stdout, "")
+    fake = FakeAcpFactory()
+    fake.connection.response = stdout
     provider = backend(tmp_path, fake)
     await provider.start(tmp_path)
 
@@ -297,7 +681,7 @@ def test_child_environment_drops_auth_and_prompt_customization_overrides(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
-    fake = FakeCli()
+    fake = FakeAcpFactory()
     monkeypatch.setenv("GH_TOKEN", "wrong-account")
     monkeypatch.setenv("GH_HOST", "example.invalid")
     monkeypatch.setenv("GITHUB_COPILOT_PROMPT_MODE_REPO_HOOKS", "true")

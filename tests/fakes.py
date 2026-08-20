@@ -17,6 +17,11 @@ from harbor_voice.domain import (
 class FakeTranscriber:
     events: list[str]
     result: Transcript = field(default_factory=lambda: Transcript("hello", confidence=0.9))
+    prepare_calls: int = 0
+
+    async def prepare(self) -> None:
+        self.events.append("transcriber.prepare")
+        self.prepare_calls += 1
 
     async def transcribe(self, recording: AudioRecording) -> Transcript:
         self.events.append("transcriber.transcribe")
@@ -84,4 +89,3 @@ class FakeRunner:
 
 def sample_recording() -> AudioRecording:
     return AudioRecording(pcm=b"\x00\x00" * 4_000, sample_rate=16_000)
-

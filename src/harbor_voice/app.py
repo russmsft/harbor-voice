@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import sys
 from collections.abc import Coroutine
 from contextlib import suppress
@@ -167,6 +168,7 @@ class HarborRuntime:
         window: ConversationWindow | None = None,
         guard: SingleInstanceGuard | None = None,
         startup_registration: StartupRegistration | None = None,
+        logger: logging.Logger | None = None,
     ) -> None:
         self.application = application
         self.loop = loop
@@ -178,6 +180,7 @@ class HarborRuntime:
         self.window = window or ConversationWindow()
         self.guard = guard or SingleInstanceGuard(paths.root / "instance.lock")
         self.startup_registration = startup_registration or StartupRegistration()
+        self.logger = logger
         self.history_store = HistoryStore(paths.history, settings.retention)
         self.graph = build_components(
             settings,
@@ -194,6 +197,7 @@ class HarborRuntime:
         self._approval_dialog: ApprovalDialog | None = None
         self._operation_task: asyncio.Task[None] | None = None
         self._shutdown_task: asyncio.Task[None] | None = None
+        self._transcriber_prepare_task: asyncio.Task[None] | None = None
         self._recording = False
         self._operation_state = AppState.IDLE
         self._muted = False
@@ -204,14 +208,36 @@ class HarborRuntime:
     async def start(self) -> bool:
         if not self.guard.acquire():
             return False
-        await self.providers.backend.start(self.settings.workspace)
-        self._hotkey.start()
-        self.tray.show()
-        self._set_state(AppState.IDLE)
-        self._started = True
-        return True
+        try:
+            prepare = getattr(self.providers.transcriber, "prepare", None)
+            if callable(prepare):
+                task = self._running_loop().create_task(prepare())
+                task.add_done_callback(self._transcriber_prepare_finished)
+                self._transcriber_prepare_task = task
+                await asyncio.sleep(0)
+            await self.providers.backend.start(self.settings.workspace)
+            self._hotkey.start()
+            self.tray.show()
+            self._set_state(AppState.IDLE)
+            self._started = True
+            return True
+        except BaseException:
+            prepare_task = self._transcriber_prepare_task
+            if prepare_task is not None and not prepare_task.done():
+                prepare_task.cancel()
+                await asyncio.gather(prepare_task, return_exceptions=True)
+            with suppress(Exception):
+                self._hotkey.stop()
+            with suppress(Exception):
+                self.tray.hide()
+            with suppress(Exception):
+                await self.providers.backend.close()
+            self.guard.release()
+            raise
 
     def handle_press(self) -> None:
+        if self.logger is not None:
+            self.logger.info("hotkey_pressed")
         if self._closed or self._muted or self._recording:
             return
         active = self._operation_task
@@ -231,6 +257,8 @@ class HarborRuntime:
         self._set_state(AppState.LISTENING)
 
     def handle_release(self) -> asyncio.Task[None]:
+        if self.logger is not None:
+            self.logger.info("hotkey_released")
         loop = self._running_loop()
         if self._closed or not self._recording:
             return loop.create_task(self._nothing())
@@ -264,6 +292,10 @@ class HarborRuntime:
             self._hotkey.stop()
         except Exception as exc:
             errors.append(exc)
+        prepare_task = self._transcriber_prepare_task
+        if prepare_task is not None and not prepare_task.done():
+            prepare_task.cancel()
+            await asyncio.gather(prepare_task, return_exceptions=True)
         try:
             self.providers.recorder.close()
         except Exception as exc:
@@ -315,6 +347,8 @@ class HarborRuntime:
 
     def _set_state(self, state: AppState) -> None:
         self._operation_state = state
+        if self.logger is not None:
+            self.logger.info("state=%s", state.value)
         self._render_state()
         if state is AppState.APPROVAL and self.graph.coordinator.pending is not None:
             self._show_approval()
@@ -441,7 +475,28 @@ class HarborRuntime:
             return
         error = task.exception()
         if error is not None:
+            if self.logger is not None:
+                self.logger.error("operation_failed error_type=%s", type(error).__name__)
             self.graph.coordinator.report_error(error)
+
+    def _transcriber_prepare_finished(self, task: asyncio.Task[None]) -> None:
+        if task.cancelled():
+            return
+        error = task.exception()
+        if error is None:
+            if self.logger is not None:
+                self.logger.info("transcriber_prepared")
+            return
+        if self.logger is not None:
+            self.logger.error(
+                "transcriber_prepare_failed error_type=%s",
+                type(error).__name__,
+            )
+        if self._started:
+            self.tray.notify(
+                "Harbor Voice",
+                "The speech model could not preload; the first turn will retry.",
+            )
 
     def _render_state(self) -> None:
         visible = AppState.MUTED if self._muted else self._operation_state
@@ -503,7 +558,7 @@ def main() -> int:
     except (OSError, RuntimeError) as exc:
         print(f"Launch-at-login could not be configured: {exc}", file=sys.stderr)
         return 1
-    configure_logging(paths)
+    logger = configure_logging(paths)
     loop = qasync.QEventLoop(application)
     asyncio.set_event_loop(loop)
     runtime = HarborRuntime(
@@ -518,6 +573,7 @@ def main() -> int:
             copilot_home=paths.root / "copilot-cli",
         ),
         startup_registration=startup_registration,
+        logger=logger,
     )
     with loop:
         started = loop.run_until_complete(runtime.start())

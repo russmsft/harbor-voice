@@ -1,7 +1,8 @@
 # Harbor Voice Design Specification
 
-> Provider update (2026-08-19): Harbor Voice now uses the GitHub Copilot CLI in
-> restricted non-interactive mode instead of the original Codex SDK design. The
+> Provider update (2026-08-20): Harbor Voice now uses one persistent GitHub Copilot
+> CLI ACP session with restricted read-only tools and low reasoning effort,
+> instead of the original Codex SDK design. The
 > implementation and README are authoritative for the current provider boundary;
 > Codex-specific sections below are retained as historical design rationale. Specification
 

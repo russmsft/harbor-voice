@@ -178,8 +178,26 @@ async def test_runtime_start_initializes_backend_before_hotkey(runtime_rig: Runt
     assert await runtime_rig.runtime.start() is True
 
     assert runtime_rig.backend.started == [runtime_rig.runtime.settings.workspace]
+    assert "transcriber.prepare" in runtime_rig.events
     assert runtime_rig.events.index("backend.start") < runtime_rig.events.index("hotkey.start")
     await runtime_rig.runtime.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_startup_failure_rolls_back_hotkey_and_instance_lock(
+    runtime_rig: RuntimeRig,
+) -> None:
+    runtime_rig.runtime.tray.show = lambda: (_ for _ in ()).throw(
+        RuntimeError("tray unavailable")
+    )
+
+    with pytest.raises(RuntimeError, match="tray unavailable"):
+        await runtime_rig.runtime.start()
+
+    assert "hotkey.stop" in runtime_rig.events
+    assert runtime_rig.backend.close_calls == 1
+    assert runtime_rig.runtime.guard.acquire() is True
+    runtime_rig.runtime.guard.release()
 
 
 @pytest.mark.asyncio

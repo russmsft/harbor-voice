@@ -7,7 +7,7 @@
 <p align="center">
   <img alt="Windows 10 and 11" src="https://img.shields.io/badge/Windows-10%20%7C%2011-38bdf8">
   <img alt="Python 3.11 and 3.12" src="https://img.shields.io/badge/Python-3.11%20%7C%203.12-818cf8">
-  <img alt="155 automated tests" src="https://img.shields.io/badge/tests-155%20passed-2dd4bf">
+  <img alt="165 automated tests" src="https://img.shields.io/badge/tests-165%20passed-2dd4bf">
   <a href="LICENSE"><img alt="MIT licence" src="https://img.shields.io/badge/license-MIT-fbbf24"></a>
 </p>
 
@@ -39,8 +39,10 @@ Harbor Voice is designed around the opposite priority:
 - Global hold-to-talk shortcut (`F9` by default).
 - In-memory, 16 kHz mono microphone capture.
 - Local transcription with faster-whisper (`base.en` by default).
+- Concurrent Whisper preloading so model startup does not delay the first request.
 - Local Windows SAPI speech with immediate interruption.
-- In-memory conversation context backed by non-interactive GitHub Copilot CLI turns.
+- One persistent GitHub Copilot ACP session, avoiding per-request CLI startup.
+- Low reasoning effort for short voice-assistant latency while preserving the selected model.
 - Normal turns expose only file-view/search tools; shell, file-edit, network,
   GitHub MCP, custom instructions, remote control, and remote session export are disabled.
 - One-shot confirmation for workspace file changes, registered applications, HTTPS pages,
@@ -228,7 +230,7 @@ approval reuse, storage privacy, UI behaviour, and installer semantics have dedi
 uv run pytest -q
 ```
 
-The current suite contains 155 tests. Hardware and authenticated GitHub Copilot conversation checks
+The current suite contains 165 tests. Hardware and authenticated GitHub Copilot conversation checks
 remain explicit manual smoke tests on the target Windows account.
 
 ## Roadmap

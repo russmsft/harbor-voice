@@ -69,3 +69,20 @@ async def test_model_is_created_lazily_once() -> None:
 
     assert calls == 1
 
+
+@pytest.mark.asyncio
+async def test_prepare_loads_model_before_first_transcription() -> None:
+    fake = FakeWhisper()
+    calls = 0
+
+    def factory() -> FakeWhisper:
+        nonlocal calls
+        calls += 1
+        return fake
+
+    transcriber = FasterWhisperTranscriber(model_factory=factory)
+
+    await transcriber.prepare()
+    await transcriber.transcribe(AudioRecording(pcm=b"\x00\x00", sample_rate=16_000))
+
+    assert calls == 1

@@ -13,6 +13,7 @@ from collections.abc import Awaitable, Callable
 from ctypes import wintypes
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any, Protocol
 
 from pydantic import TypeAdapter, ValidationError
 
@@ -49,9 +50,6 @@ class CliResult:
     returncode: int
     stdout: str
     stderr: str
-
-
-CliRunner = Callable[[list[str], Path, dict[str, str]], Awaitable[CliResult]]
 
 
 class _IoCounters(ctypes.Structure):
@@ -206,6 +204,7 @@ class _WindowsProcess:
         self._configure_functions()
         self._job = _WindowsJob(self._kernel32)
         self._process: wintypes.HANDLE | None = None
+        self._stdin = None
         self._stdout = None
         self._stderr = None
         security = _SecurityAttributes(
@@ -213,24 +212,24 @@ class _WindowsProcess:
             None,
             True,
         )
+        stdin_read, stdin_write = wintypes.HANDLE(), wintypes.HANDLE()
         stdout_read, stdout_write = wintypes.HANDLE(), wintypes.HANDLE()
         stderr_read, stderr_write = wintypes.HANDLE(), wintypes.HANDLE()
-        nul = wintypes.HANDLE()
         process_info = _ProcessInformation()
         thread = None
         attribute_list = None
         try:
+            self._create_input_pipe(stdin_read, stdin_write, security)
             self._create_pipe(stdout_read, stdout_write, security)
             self._create_pipe(stderr_read, stderr_write, security)
-            nul = self._open_nul()
             startup = _StartupInfoEx()
             startup.startup_info.cb = ctypes.sizeof(_StartupInfoEx)
             startup.startup_info.flags = self._STARTF_USESTDHANDLES
-            startup.startup_info.stdin = nul
+            startup.startup_info.stdin = stdin_read
             startup.startup_info.stdout = stdout_write
             startup.startup_info.stderr = stderr_write
             attribute_list, handle_list = self._create_handle_list(
-                nul,
+                stdin_read,
                 stdout_write,
                 stderr_write,
             )
@@ -267,12 +266,15 @@ class _WindowsProcess:
                 raise ctypes.WinError(ctypes.get_last_error())
             self._kernel32.CloseHandle(thread)
             thread = None
+            self._close_handle(stdin_read)
+            stdin_read = wintypes.HANDLE()
             self._close_handle(stdout_write)
             stdout_write = wintypes.HANDLE()
             self._close_handle(stderr_write)
             stderr_write = wintypes.HANDLE()
-            self._close_handle(nul)
-            nul = wintypes.HANDLE()
+            stdin_fd = msvcrt.open_osfhandle(stdin_write.value, os.O_WRONLY | os.O_BINARY)
+            stdin_write = wintypes.HANDLE()
+            self._stdin = os.fdopen(stdin_fd, "wb", buffering=0)
             stdout_fd = msvcrt.open_osfhandle(stdout_read.value, os.O_RDONLY | os.O_BINARY)
             stdout_read = wintypes.HANDLE()
             self._stdout = os.fdopen(stdout_fd, "rb", buffering=0)
@@ -286,6 +288,9 @@ class _WindowsProcess:
                 self._kernel32.WaitForSingleObject(self._process, 5_000)
                 self._kernel32.CloseHandle(self._process)
                 self._process = None
+            if self._stdin is not None:
+                self._stdin.close()
+                self._stdin = None
             if self._stdout is not None:
                 self._stdout.close()
                 self._stdout = None
@@ -298,10 +303,19 @@ class _WindowsProcess:
                 self._kernel32.DeleteProcThreadAttributeList(
                     ctypes.cast(attribute_list, ctypes.c_void_p)
                 )
-            for handle in (thread, stdout_read, stdout_write, stderr_read, stderr_write, nul):
+            for handle in (
+                thread,
+                stdin_read,
+                stdin_write,
+                stdout_read,
+                stdout_write,
+                stderr_read,
+                stderr_write,
+            ):
                 self._close_handle(handle)
 
     async def communicate(self) -> CliResult:
+        await self.close_stdin()
         stdout_task = asyncio.create_task(asyncio.to_thread(self._stdout.read))
         stderr_task = asyncio.create_task(asyncio.to_thread(self._stderr.read))
         wait_task = asyncio.create_task(asyncio.to_thread(self._wait))
@@ -326,8 +340,43 @@ class _WindowsProcess:
             stderr=stderr.decode("utf-8", errors="replace"),
         )
 
+    async def write_line(self, line: str) -> None:
+        if self._stdin is None:
+            raise RuntimeError("Copilot ACP stdin is closed")
+        await asyncio.to_thread(self._write_line, line)
+
+    def _write_line(self, line: str) -> None:
+        self._stdin.write(line.encode("utf-8") + b"\n")
+        self._stdin.flush()
+
+    async def read_stdout_line(self) -> str:
+        if self._stdout is None:
+            return ""
+        line = await asyncio.to_thread(self._stdout.readline)
+        return line.decode("utf-8", errors="replace")
+
+    async def read_stderr(self) -> str:
+        if self._stderr is None:
+            return ""
+        content = await asyncio.to_thread(self._stderr.read)
+        return content.decode("utf-8", errors="replace")
+
+    async def close_stdin(self) -> None:
+        stdin, self._stdin = self._stdin, None
+        if stdin is not None:
+            await asyncio.to_thread(stdin.close)
+
+    async def wait(self) -> int:
+        return await asyncio.to_thread(self._wait)
+
+    def terminate(self) -> None:
+        self._job.close()
+
     def close(self) -> None:
         self._job.close()
+        if self._stdin is not None:
+            self._stdin.close()
+            self._stdin = None
         if self._stdout is not None:
             self._stdout.close()
             self._stdout = None
@@ -366,26 +415,25 @@ class _WindowsProcess:
         ):
             raise ctypes.WinError(ctypes.get_last_error())
 
-    def _open_nul(self) -> wintypes.HANDLE:
-        handle = self._kernel32.CreateFileW(
-            "NUL",
-            0x80000000,
-            0x00000001 | 0x00000002,
-            None,
-            3,
-            0x00000080,
-            None,
-        )
-        if handle == wintypes.HANDLE(-1).value:
+    def _create_input_pipe(
+        self,
+        read: wintypes.HANDLE,
+        write: wintypes.HANDLE,
+        security: _SecurityAttributes,
+    ) -> None:
+        if not self._kernel32.CreatePipe(
+            ctypes.byref(read),
+            ctypes.byref(write),
+            ctypes.byref(security),
+            0,
+        ):
             raise ctypes.WinError(ctypes.get_last_error())
         if not self._kernel32.SetHandleInformation(
-            handle,
+            write,
             self._HANDLE_FLAG_INHERIT,
-            self._HANDLE_FLAG_INHERIT,
+            0,
         ):
-            self._kernel32.CloseHandle(handle)
             raise ctypes.WinError(ctypes.get_last_error())
-        return handle
 
     def _create_handle_list(
         self,
@@ -531,20 +579,365 @@ async def _run_cli(
     )
 
 
+class AcpProcess(Protocol):
+    async def write_line(self, line: str) -> None: ...
+
+    async def read_stdout_line(self) -> str: ...
+
+    async def read_stderr(self) -> str: ...
+
+    async def close_stdin(self) -> None: ...
+
+    async def wait(self) -> int: ...
+
+    def terminate(self) -> None: ...
+
+    def close(self) -> None: ...
+
+
+class _AsyncioAcpProcess:
+    def __init__(self, process: asyncio.subprocess.Process) -> None:
+        self._process = process
+
+    async def write_line(self, line: str) -> None:
+        if self._process.stdin is None:
+            raise RuntimeError("Copilot ACP stdin is closed")
+        self._process.stdin.write(line.encode("utf-8") + b"\n")
+        await self._process.stdin.drain()
+
+    async def read_stdout_line(self) -> str:
+        if self._process.stdout is None:
+            return ""
+        line = await self._process.stdout.readline()
+        return line.decode("utf-8", errors="replace")
+
+    async def read_stderr(self) -> str:
+        if self._process.stderr is None:
+            return ""
+        content = await self._process.stderr.read()
+        return content.decode("utf-8", errors="replace")
+
+    async def close_stdin(self) -> None:
+        if self._process.stdin is not None:
+            self._process.stdin.close()
+            await self._process.stdin.wait_closed()
+
+    async def wait(self) -> int:
+        return await self._process.wait()
+
+    def terminate(self) -> None:
+        if self._process.returncode is None:
+            self._process.kill()
+
+    def close(self) -> None:
+        return None
+
+
+async def _start_acp_process(
+    arguments: list[str],
+    cwd: Path,
+    environment: dict[str, str],
+) -> AcpProcess:
+    if os.name == "nt":
+        return _WindowsProcess(arguments, cwd, environment)
+    process = await asyncio.create_subprocess_exec(
+        *arguments,
+        cwd=str(cwd),
+        env=environment,
+        stdin=asyncio.subprocess.PIPE,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+    )
+    return _AsyncioAcpProcess(process)
+
+
+AcpProcessFactory = Callable[[list[str], Path, dict[str, str]], Awaitable[AcpProcess]]
+
+
+class CopilotAcpConnection:
+    def __init__(
+        self,
+        arguments: list[str],
+        cwd: Path,
+        environment: dict[str, str],
+        *,
+        process_factory: AcpProcessFactory = _start_acp_process,
+    ) -> None:
+        self.arguments = list(arguments)
+        self.cwd = cwd
+        self.environment = dict(environment)
+        self._process_factory = process_factory
+        self._process: AcpProcess | None = None
+        self._stderr_task: asyncio.Task[str] | None = None
+        self._request_lock = asyncio.Lock()
+        self._write_lock = asyncio.Lock()
+        self._next_request_id = 0
+
+    async def start(self) -> None:
+        if self._process is not None:
+            raise RuntimeError("Copilot ACP connection is already started")
+        self._process = await self._process_factory(
+            self.arguments,
+            self.cwd,
+            self.environment,
+        )
+        self._stderr_task = asyncio.create_task(self._process.read_stderr())
+        try:
+            result = await self._request(
+                "initialize",
+                {
+                    "protocolVersion": 1,
+                    "clientCapabilities": {},
+                    "clientInfo": {"name": "harbor-voice", "version": "0.1.0"},
+                },
+            )
+        except BaseException:
+            await self.close()
+            raise
+        if result.get("protocolVersion") != 1:
+            await self.close()
+            raise RuntimeError("GitHub Copilot CLI does not support ACP protocol version 1")
+
+    async def new_session(self, workspace: Path) -> str:
+        result = await self._request(
+            "session/new",
+            {"cwd": str(workspace), "mcpServers": []},
+        )
+        session_id = result.get("sessionId")
+        if not isinstance(session_id, str) or not session_id:
+            raise RuntimeError("GitHub Copilot ACP did not return a session identifier")
+        return session_id
+
+    async def prompt(self, session_id: str, text: str) -> str:
+        messages: dict[str, list[str]] = {}
+        message_order: list[str] = []
+        anonymous_message = 0
+        active_anonymous_id: str | None = None
+
+        def collect(message: dict[str, Any]) -> None:
+            nonlocal active_anonymous_id, anonymous_message
+            if message.get("method") != "session/update":
+                return
+            params = message.get("params")
+            if not isinstance(params, dict):
+                return
+            update = params.get("update")
+            if not isinstance(update, dict):
+                return
+            update_type = update.get("sessionUpdate")
+            if update_type != "agent_message_chunk":
+                if update_type in {
+                    "agent_thought_chunk",
+                    "plan",
+                    "tool_call",
+                    "tool_call_update",
+                }:
+                    active_anonymous_id = None
+                return
+            content = update.get("content")
+            if not isinstance(content, dict):
+                return
+            chunk = content.get("text")
+            if isinstance(chunk, str):
+                message_id = update.get("messageId")
+                if not isinstance(message_id, str) or not message_id:
+                    if active_anonymous_id is None:
+                        anonymous_message += 1
+                        active_anonymous_id = f"__anonymous_{anonymous_message}"
+                    message_id = active_anonymous_id
+                if message_id not in messages:
+                    messages[message_id] = []
+                    message_order.append(message_id)
+                messages[message_id].append(chunk)
+
+        result = await self._request(
+            "session/prompt",
+            {
+                "sessionId": session_id,
+                "prompt": [{"type": "text", "text": text}],
+            },
+            notification_handler=collect,
+        )
+        stop_reason = result.get("stopReason")
+        if stop_reason not in {"end_turn", "cancelled"}:
+            raise RuntimeError(f"GitHub Copilot ACP stopped unexpectedly: {stop_reason}")
+        if not message_order:
+            return ""
+        return "".join(messages[message_order[-1]])
+
+    async def cancel(self, session_id: str) -> None:
+        await self._send(
+            {
+                "jsonrpc": "2.0",
+                "method": "session/cancel",
+                "params": {"sessionId": session_id},
+            }
+        )
+
+    async def close(self) -> None:
+        process, self._process = self._process, None
+        if process is None:
+            return
+        try:
+            await process.close_stdin()
+            try:
+                await asyncio.wait_for(process.wait(), timeout=5)
+            except TimeoutError:
+                process.terminate()
+                await process.wait()
+        finally:
+            process.close()
+            stderr_task, self._stderr_task = self._stderr_task, None
+            if stderr_task is not None:
+                await asyncio.gather(stderr_task, return_exceptions=True)
+
+    async def abort(self) -> None:
+        process, self._process = self._process, None
+        if process is None:
+            return
+        process.terminate()
+        try:
+            await asyncio.wait_for(process.wait(), timeout=5)
+        finally:
+            process.close()
+            stderr_task, self._stderr_task = self._stderr_task, None
+            if stderr_task is not None:
+                await asyncio.gather(stderr_task, return_exceptions=True)
+
+    async def _request(
+        self,
+        method: str,
+        params: dict[str, Any],
+        *,
+        notification_handler: Callable[[dict[str, Any]], None] | None = None,
+    ) -> dict[str, Any]:
+        async with self._request_lock:
+            self._next_request_id += 1
+            request_id = self._next_request_id
+            await self._send(
+                {
+                    "jsonrpc": "2.0",
+                    "id": request_id,
+                    "method": method,
+                    "params": params,
+                }
+            )
+            while True:
+                message = await self._read_message()
+                if message.get("id") == request_id and "method" not in message:
+                    if "error" in message:
+                        raise RuntimeError(
+                            f"GitHub Copilot ACP request failed: {message['error']}"
+                        )
+                    result = message.get("result")
+                    if not isinstance(result, dict):
+                        raise RuntimeError("GitHub Copilot ACP returned an invalid result")
+                    return result
+                if "id" in message and "method" in message:
+                    await self._deny_server_request(message)
+                elif notification_handler is not None:
+                    notification_handler(message)
+
+    async def _send(self, message: dict[str, Any]) -> None:
+        process = self._require_process()
+        encoded = json.dumps(message, separators=(",", ":"), ensure_ascii=False)
+        async with self._write_lock:
+            await process.write_line(encoded)
+
+    async def _read_message(self) -> dict[str, Any]:
+        line = await self._require_process().read_stdout_line()
+        if not line:
+            detail = ""
+            if self._stderr_task is not None and self._stderr_task.done():
+                detail = self._stderr_task.result().strip()
+            suffix = f": {detail[:500]}" if detail else ""
+            raise RuntimeError(f"GitHub Copilot ACP closed unexpectedly{suffix}")
+        try:
+            message = json.loads(line)
+        except json.JSONDecodeError as exc:
+            raise RuntimeError("GitHub Copilot ACP returned invalid JSON") from exc
+        if not isinstance(message, dict):
+            raise RuntimeError("GitHub Copilot ACP returned an invalid message")
+        return message
+
+    async def _deny_server_request(self, message: dict[str, Any]) -> None:
+        request_id = message["id"]
+        if message.get("method") == "session/request_permission":
+            params = message.get("params")
+            options = params.get("options", []) if isinstance(params, dict) else []
+            reject_option = next(
+                (
+                    option
+                    for option in options
+                    if isinstance(option, dict)
+                    and option.get("kind") in {"reject_once", "reject_always"}
+                    and isinstance(option.get("optionId"), str)
+                ),
+                None,
+            )
+            if reject_option is None:
+                outcome = {"outcome": "cancelled"}
+            else:
+                outcome = {
+                    "outcome": "selected",
+                    "optionId": reject_option["optionId"],
+                }
+            response = {
+                "jsonrpc": "2.0",
+                "id": request_id,
+                "result": {"outcome": outcome},
+            }
+        else:
+            response = {
+                "jsonrpc": "2.0",
+                "id": request_id,
+                "error": {"code": -32601, "message": "Client method is not supported"},
+            }
+        await self._send(response)
+
+    def _require_process(self) -> AcpProcess:
+        if self._process is None:
+            raise RuntimeError("GitHub Copilot ACP connection is not started")
+        return self._process
+
+
+class AcpConnection(Protocol):
+    async def start(self) -> None: ...
+
+    async def new_session(self, workspace: Path) -> str: ...
+
+    async def prompt(self, session_id: str, text: str) -> str: ...
+
+    async def cancel(self, session_id: str) -> None: ...
+
+    async def close(self) -> None: ...
+
+    async def abort(self) -> None: ...
+
+
+AcpConnectionFactory = Callable[[list[str], Path, dict[str, str]], AcpConnection]
+
+
 class CopilotCliBackend:
     def __init__(
         self,
         *,
         copilot_home: Path,
         executable: str | None = None,
-        runner: CliRunner = _run_cli,
+        connection_factory: AcpConnectionFactory = CopilotAcpConnection,
         timeout_seconds: float = 180.0,
+        startup_timeout_seconds: float = 30.0,
     ) -> None:
         self._configured_executable = executable
         self._copilot_home = copilot_home.expanduser().resolve(strict=False)
         self._executable: str | None = None
-        self._runner = runner
+        self._connection_factory = connection_factory
         self._timeout_seconds = timeout_seconds
+        self._startup_timeout_seconds = startup_timeout_seconds
+        self._connection: AcpConnection | None = None
+        self._session_id: str | None = None
+        self._primed = False
         self._history: list[tuple[str, str]] = []
         self.workspace: Path | None = None
 
@@ -562,27 +955,64 @@ class CopilotCliBackend:
         self._executable = executable
         self._prepare_copilot_home()
         self.workspace = resolved
+        try:
+            await self._open_connection()
+        except BaseException:
+            self.workspace = None
+            self._executable = None
+            raise
         self._history.clear()
+        self._primed = False
+
+    async def _open_connection(self) -> None:
+        workspace = self._require_workspace()
+        connection = self._connection_factory(
+            self._server_arguments(),
+            workspace,
+            self._environment(),
+        )
+        self._connection = connection
+        try:
+            await asyncio.wait_for(
+                connection.start(),
+                timeout=self._startup_timeout_seconds,
+            )
+            self._session_id = await asyncio.wait_for(
+                connection.new_session(workspace),
+                timeout=self._startup_timeout_seconds,
+            )
+        except BaseException:
+            await connection.abort()
+            self._connection = None
+            self._session_id = None
+            raise
 
     async def ask(self, request: AssistantRequest) -> AssistantResponse:
-        prompt = self._build_prompt(request.text)
-        try:
-            result = await asyncio.wait_for(
-                self._runner(
-                    self._arguments(prompt),
-                    self._require_workspace(),
-                    self._environment(),
-                ),
-                timeout=self._timeout_seconds,
-            )
-        except TimeoutError as exc:
-            raise RuntimeError("GitHub Copilot CLI timed out") from exc
-        if result.returncode != 0:
-            detail = result.stderr.strip() or result.stdout.strip() or "no diagnostic output"
-            raise RuntimeError(
-                f"GitHub Copilot CLI exited with code {result.returncode}: {detail[:500]}"
-            )
-        raw = _extract_response_json(result.stdout)
+        raw = ""
+        for attempt in range(2):
+            await self._ensure_connection()
+            prompt = self._build_prompt(request.text)
+            connection = self._require_connection()
+            session_id = self._require_session_id()
+            prompt_task = asyncio.create_task(connection.prompt(session_id, prompt))
+            try:
+                raw = await asyncio.wait_for(
+                    asyncio.shield(prompt_task),
+                    timeout=self._timeout_seconds,
+                )
+                break
+            except TimeoutError as exc:
+                await self._cancel_and_drain(connection, session_id, prompt_task)
+                raise RuntimeError("GitHub Copilot CLI timed out") from exc
+            except asyncio.CancelledError:
+                await self._cancel_and_drain(connection, session_id, prompt_task)
+                raise
+            except (OSError, RuntimeError):
+                await self._disconnect_connection(connection, prompt_task)
+                if attempt > 0:
+                    raise
+        self._primed = True
+        raw = _extract_response_json(raw)
         try:
             response = parse_assistant_response(raw)
         except ValidationError:
@@ -640,28 +1070,45 @@ class CopilotCliBackend:
         )
 
     async def reset(self) -> None:
-        self._require_workspace()
+        workspace = self._require_workspace()
         self._history.clear()
+        self._primed = False
+        connection = self._connection
+        if connection is None:
+            await self._ensure_connection()
+            return
+        self._session_id = None
+        try:
+            self._session_id = await asyncio.wait_for(
+                connection.new_session(workspace),
+                timeout=self._startup_timeout_seconds,
+            )
+        except (TimeoutError, OSError, RuntimeError):
+            await self._restart_connection(connection)
 
     async def close(self) -> None:
+        connection, self._connection = self._connection, None
+        self._session_id = None
+        self._primed = False
         self._history.clear()
         self.workspace = None
         self._executable = None
+        if connection is not None:
+            await connection.close()
 
     def _require_workspace(self) -> Path:
         if self.workspace is None:
             raise RuntimeError("GitHub Copilot CLI backend is not started")
         return self.workspace
 
-    def _arguments(self, prompt: str) -> list[str]:
+    def _server_arguments(self) -> list[str]:
         executable = self._executable
         if executable is None:
             raise RuntimeError("GitHub Copilot CLI backend is not started")
         return [
             executable,
-            "-p",
-            prompt,
-            "-s",
+            "--acp",
+            "--stdio",
             "--no-color",
             "--no-ask-user",
             "--no-auto-update",
@@ -670,17 +1117,22 @@ class CopilotCliBackend:
             "--no-remote-export",
             "--disable-builtin-mcps",
             "--disallow-temp-dir",
-            "--stream",
-            "off",
-            "--output-format",
-            "json",
+            "--effort",
+            "low",
             "--log-level",
             "none",
             "--available-tools",
             "view,grep,glob",
+            "--allow-tool",
+            "view,grep,glob",
         ]
 
     def _build_prompt(self, request: str) -> str:
+        if self._primed:
+            return (
+                "Continue following the Harbor Voice JSON response contract. "
+                f"Current user request:\n{request}"
+            )
         schema = json.dumps(ASSISTANT_RESPONSE_SCHEMA, separators=(",", ":"))
         history = json.dumps(
             [{"role": role, "content": text} for role, text in self._history],
@@ -738,10 +1190,66 @@ class CopilotCliBackend:
             temporary.write_text(content, encoding="utf-8", newline="\n")
             os.replace(temporary, path)
 
+    def _require_connection(self) -> AcpConnection:
+        if self._connection is None:
+            raise RuntimeError("GitHub Copilot CLI backend is not started")
+        return self._connection
+
+    async def _ensure_connection(self) -> None:
+        if self._connection is None:
+            await self._open_connection()
+            self._primed = False
+
+    def _require_session_id(self) -> str:
+        if self._session_id is None:
+            raise RuntimeError("GitHub Copilot CLI backend is not started")
+        return self._session_id
+
     def _trim_history(self) -> None:
         self._history = self._history[-_MAX_HISTORY_ITEMS:]
         while sum(len(text) for _, text in self._history) > _MAX_HISTORY_CHARS:
             self._history.pop(0)
+
+    async def _cancel_and_drain(
+        self,
+        connection: AcpConnection,
+        session_id: str,
+        prompt_task: asyncio.Task[str],
+    ) -> None:
+        clean_cancel = True
+        try:
+            await asyncio.wait_for(connection.cancel(session_id), timeout=2)
+        except (TimeoutError, OSError, RuntimeError):
+            clean_cancel = False
+        if clean_cancel:
+            try:
+                await asyncio.wait_for(asyncio.shield(prompt_task), timeout=10)
+                return
+            except (TimeoutError, OSError, RuntimeError):
+                pass
+
+        self._connection = None
+        self._session_id = None
+        await self._disconnect_connection(connection, prompt_task)
+
+    async def _disconnect_connection(
+        self,
+        connection: AcpConnection,
+        prompt_task: asyncio.Task[str],
+    ) -> None:
+        self._connection = None
+        self._session_id = None
+        await connection.abort()
+        prompt_task.cancel()
+        await asyncio.gather(prompt_task, return_exceptions=True)
+        self._primed = False
+
+    async def _restart_connection(self, connection: AcpConnection) -> None:
+        self._connection = None
+        self._session_id = None
+        await connection.abort()
+        await self._open_connection()
+        self._primed = False
 
 
 def _extract_response_json(raw: str) -> str:
@@ -765,5 +1273,19 @@ def _extract_response_json(raw: str) -> str:
     if text.startswith("```") and text.endswith("```"):
         lines = text.splitlines()
         if len(lines) >= 3:
-            return "\n".join(lines[1:-1]).strip()
+            text = "\n".join(lines[1:-1]).strip()
+    decoder = json.JSONDecoder()
+    for index in range(len(text) - 1, -1, -1):
+        if text[index] != "{":
+            continue
+        try:
+            value, end = decoder.raw_decode(text, index)
+        except json.JSONDecodeError:
+            continue
+        if (
+            isinstance(value, dict)
+            and value.get("kind") == "message"
+            and not text[end:].strip()
+        ):
+            return json.dumps(value, separators=(",", ":"), ensure_ascii=False)
     return text

@@ -31,6 +31,38 @@ class FasterWhisperTranscriber:
     async def transcribe(self, recording: AudioRecording) -> Transcript:
         return await asyncio.to_thread(self._transcribe_sync, recording)
 
+    async def prepare(self) -> None:
+        """Load the local model before the first recorded turn."""
+        loop = asyncio.get_running_loop()
+        ready: asyncio.Future[None] = loop.create_future()
+
+        def load() -> None:
+            try:
+                self._get_model()
+            except BaseException as exc:
+                loop.call_soon_threadsafe(self._resolve_prepare, ready, exc)
+            else:
+                loop.call_soon_threadsafe(self._resolve_prepare, ready, None)
+
+        threading.Thread(
+            target=load,
+            name="harbor-whisper-prepare",
+            daemon=True,
+        ).start()
+        await ready
+
+    @staticmethod
+    def _resolve_prepare(
+        ready: asyncio.Future[None],
+        error: BaseException | None,
+    ) -> None:
+        if ready.done():
+            return
+        if error is None:
+            ready.set_result(None)
+        else:
+            ready.set_exception(error)
+
     def _transcribe_sync(self, recording: AudioRecording) -> Transcript:
         model = self._get_model()
         samples = np.frombuffer(recording.pcm, dtype=np.int16).astype(np.float32)
@@ -54,4 +86,3 @@ class FasterWhisperTranscriber:
             device=self.device,
             compute_type=self.compute_type,
         )
-
