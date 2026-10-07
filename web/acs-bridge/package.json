@@ -1,0 +1,16 @@
+{
+  "name": "harbor-voice-acs-bridge",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Headless Azure Communication Services meeting participant for Harbor Voice",
+  "scripts": {
+    "build": "esbuild src/bridge.js --bundle --format=esm --target=chrome120 --outfile=../../src/harbor_voice/meeting/acs/static/bridge.js --minify --log-level=warning"
+  },
+  "dependencies": {
+    "@azure/communication-calling": "^2.0.0",
+    "@azure/communication-common": "^2.3.1"
+  },
+  "devDependencies": {
+    "esbuild": "^0.28.2"
+  }
+}

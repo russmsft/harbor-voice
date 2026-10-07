@@ -71,7 +71,8 @@ def recording() -> AudioRecording:
     [
         ("Scout, what is the MACC balance?", True),
         ("Hey scout can you summarise", True),
-        ("Boy scouts are great", False),
+        ("Scouting is great", False),
+        ("Scouts, what can you do?", True),
         ("Let's move on", False),
     ],
 )

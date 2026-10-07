@@ -1,11 +1,102 @@
 # Meeting mode
 
+Harbor Voice can take part in Microsoft Teams meetings in two ways:
+
+| | **Meeting mode (local)** | **Send Scout to a meeting (Azure)** |
+|---|---|---|
+| Who is in the meeting | You. Scout speaks through your microphone | Scout joins as its own guest, **"Scout (AI)"** |
+| Setup | VB-Audio Virtual Cable | Azure Communication Services + Azure AI Speech |
+| Voice | Windows SAPI, or neural if Speech is configured | Azure neural voice (`en-GB-SoniaNeural`) |
+| Needs your PC in the call | Yes | No, only Harbor Voice running |
+| Speaker attribution | Participant / Me | Participant |
+
+Both modes share the same agent: a rolling in-memory transcript, the "Scout, …" trigger,
+the read-only Copilot reasoning session, and the same guardrails.
+
+## Send Scout to a meeting (Azure participant)
+
+```mermaid
+flowchart LR
+    TM[Teams meeting] <-->|ACS Teams interop, guest join| E[Headless Edge page<br/>ACS Web Calling SDK]
+    E <-->|loopback WebSocket, nonce| H[Harbor Voice]
+    H --> W[faster-whisper] --> A[Meeting agent + Copilot CLI]
+    A --> S[Azure AI Speech neural TTS] --> H
+```
+
+1. Tray menu → **Send Scout to a meeting…**, then paste the Teams join link. A link on the
+   clipboard is filled in for you.
+2. Harbor Voice starts an isolated, throwaway headless Edge profile on `localhost`. It issues
+   a short-lived ACS VoIP token using your Azure CLI sign-in and joins the meeting as
+   **Scout (AI)**.
+3. **Admit Scout (AI) from the lobby.** It introduces itself, then answers whenever it hears
+   "Scout, …". Saying "Scout" on its own gets a "Yes?" and the next sentence is treated as the
+   question.
+4. Tray → **Remove Scout from the meeting**, or remove it from the participant list in
+   Teams. Either way the browser profile and transcript are discarded.
+
+### Azure resources
+
+Created in subscription `ME-MngEnvMCAP560477-rubradfo-1`, resource group
+`rg-scout-meeting-agent`:
+
+| Resource | Purpose | Auth |
+|---|---|---|
+| `acs-scout-zyaev` (Communication Services, UK data) | Guest identity and token for the Teams meeting join | Entra ID (`Communication and Email Service Owner`) |
+| `speech-scout-zyaev` (Speech, UK South, S0) | Neural text-to-speech | Entra ID only, local auth disabled (`Cognitive Services Speech User`) |
+
+No keys are stored. Tokens come from `az login` (Azure CLI credential), then other
+non-interactive `DefaultAzureCredential` sources.
+
+To recreate them elsewhere:
+
+```powershell
+az group create -n rg-scout-meeting-agent -l uksouth
+az communication create -n <acs-name> -g rg-scout-meeting-agent --location global --data-location UK
+az cognitiveservices account create -n <speech-name> -g rg-scout-meeting-agent -l uksouth `
+  --kind SpeechServices --sku S0 --custom-domain <speech-name> --yes
+az role assignment create --assignee <you> --role "Communication and Email Service Owner" --scope <acs-id>
+az role assignment create --assignee <you> --role "Cognitive Services Speech User" --scope <speech-id>
+```
+
+### Building the participant page
+
+The ACS Web Calling SDK bundle is built from `web/acs-bridge` and isn't committed:
+
+```powershell
+cd web\acs-bridge
+npm ci
+npm run build   # writes src\harbor_voice\meeting\acs\static\bridge.js
+```
+
+`packaging\build.ps1` does this automatically when npm is available.
+
+### Azure settings
+
+| Setting | Example | Purpose |
+|---|---|---|
+| `meeting_acs_endpoint` | `https://acs-scout-zyaev.uk.communication.azure.com` | Required for **Send Scout** |
+| `meeting_speech_endpoint` | `https://speech-scout-zyaev.cognitiveservices.azure.com` | Neural voice, in both modes |
+| `meeting_neural_voice` | `en-GB-SoniaNeural` | Any Azure neural voice name |
+| `meeting_azure_tenant` | `97f5d6d2-…` | Tenant for the Azure CLI credential |
+| `meeting_display_name` | `Scout (AI)` | Name shown in the Teams roster |
+| `meeting_show_browser` | `false` | Show the participant page for debugging |
+
+### Notes and limits
+
+* Scout joins as an anonymous guest, so the meeting must allow anonymous users, and someone
+  has to admit it from the lobby. Organisers can block it with lobby or anonymous-join policy.
+* Teams may tell attendees that a guest has joined. Scout also introduces itself.
+* Remote voices arrive as one mixed stream, so everyone is labelled "Participant".
+* Azure costs are pay-as-you-go: ACS Teams-interop VoIP minutes and neural TTS characters.
+  Speech recognition stays local.
+
+---
+
+## Meeting mode (local)
+
 Meeting mode lets Harbor Voice join a Microsoft Teams meeting from your own seat. It listens
 to the conversation, and when someone addresses it by name ("Scout, …") it answers out loud
 into the meeting.
-
-It's the local first phase of a meeting agent. A later phase will add a separate
-"Scout (AI)" participant that joins through Azure Communication Services.
 
 ## How it works
 

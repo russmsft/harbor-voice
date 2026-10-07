@@ -19,6 +19,9 @@ for package in (
     binaries += package_binaries
     hiddenimports += package_hidden
 
+acs_static = project_root / "src" / "harbor_voice" / "meeting" / "acs" / "static"
+datas += [(str(path), "harbor_voice/meeting/acs/static") for path in acs_static.glob("*.*")]
+
 app_analysis = Analysis(
     [str(project_root / "src" / "harbor_voice" / "app.py")],
     pathex=pathex,

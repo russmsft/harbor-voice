@@ -42,6 +42,7 @@ class TrayController(QObject):
     settings_requested = Signal()
     new_conversation_requested = Signal()
     meeting_requested = Signal()
+    join_requested = Signal()
     answer_requested = Signal()
     quit_requested = Signal()
 
@@ -55,6 +56,7 @@ class TrayController(QObject):
         self.new_action = self.menu.addAction("New conversation")
         self.menu.addSeparator()
         self.meeting_action = self.menu.addAction("Start meeting mode")
+        self.join_action = self.menu.addAction("Send Scout to a meeting…")
         self.answer_action = self.menu.addAction("Answer latest meeting question")
         self.answer_action.setEnabled(False)
         self.menu.addSeparator()
@@ -65,13 +67,18 @@ class TrayController(QObject):
         self.settings_action.triggered.connect(self.settings_requested.emit)
         self.new_action.triggered.connect(self.new_conversation_requested.emit)
         self.meeting_action.triggered.connect(self.meeting_requested.emit)
+        self.join_action.triggered.connect(self.join_requested.emit)
         self.answer_action.triggered.connect(self.answer_requested.emit)
         self.quit_action.triggered.connect(self.quit_requested.emit)
         self.icon.activated.connect(self._activated)
         self.set_state(AppState.IDLE)
 
-    def set_meeting_active(self, active: bool) -> None:
-        self.meeting_action.setText("Stop meeting mode" if active else "Start meeting mode")
+    def set_meeting_active(self, active: bool, *, remote: bool = False) -> None:
+        if active and remote:
+            self.meeting_action.setText("Remove Scout from the meeting")
+        else:
+            self.meeting_action.setText("Stop meeting mode" if active else "Start meeting mode")
+        self.join_action.setEnabled(not active)
         self.answer_action.setEnabled(active)
 
     def show(self) -> None:

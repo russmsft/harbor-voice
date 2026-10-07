@@ -31,7 +31,7 @@ _STOP_PHRASES = frozenset(
         "hold on",
     }
 )
-_FILLER = re.compile(r"\b(ok|okay|hey|thanks|thank you|please|you can)\b")
+_FILLER = re.compile(r"\b(ok|okay|hey|hi|hello|thanks|thank you|please|you can)\b")
 
 
 @dataclass(frozen=True, slots=True)
@@ -54,7 +54,20 @@ def _wake_pattern(wake_words: Iterable[str]) -> re.Pattern[str] | None:
     words = [re.escape(_normalise(word)) for word in wake_words if _normalise(word)]
     if not words:
         return None
-    return re.compile(r"\b(?:" + "|".join(words) + r")\b")
+    # Speech recognition often hears "Scouts" or "Scout's" for "Scout".
+    return re.compile(r"\b(?:" + "|".join(words) + r")(?:'?s)?\b")
+
+
+def is_bare_wake(text: str, wake_words: Iterable[str]) -> bool:
+    """True when the utterance only names the agent, e.g. 'Hey Scout.'"""
+    pattern = _wake_pattern(wake_words)
+    if pattern is None:
+        return False
+    normalised = _normalise(text)
+    if pattern.search(normalised) is None:
+        return False
+    remainder = pattern.sub(" ", normalised)
+    return not " ".join(_FILLER.sub(" ", remainder).split())
 
 
 def addresses_agent(text: str, wake_words: Iterable[str]) -> bool:

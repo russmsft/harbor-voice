@@ -5,6 +5,8 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from datetime import datetime
+from time import monotonic
 from typing import Any, Literal
 
 from harbor_voice.domain import AssistantRequest, AssistantResponse, AudioRecording, MessageResponse
@@ -13,9 +15,12 @@ from harbor_voice.meeting.transcript import (
     PARTICIPANT,
     MeetingTranscript,
     addresses_agent,
+    is_bare_wake,
     is_stop_command,
 )
 from harbor_voice.ports import AssistantBackend, Speaker, Transcriber
+
+_ARMED_SECONDS = 12.0
 
 NO_ACTIONS_IN_MEETINGS = (
     "I can't take actions during a meeting, but I've noted it for {owner} to follow up."
@@ -68,7 +73,7 @@ class MeetingConfig:
 
 @dataclass(frozen=True, slots=True)
 class MeetingEvent:
-    kind: Literal["heard", "question", "answer", "status", "error"]
+    kind: Literal["heard", "question", "answer", "status", "error", "ended"]
     text: str
     speaker: str = ""
     question: str = ""
@@ -107,11 +112,15 @@ class MeetingAgent:
     config: MeetingConfig = field(default_factory=MeetingConfig)
     on_event: Callable[[MeetingEvent], None] = lambda event: None
     transcript: MeetingTranscript = field(default_factory=MeetingTranscript)
+    clock: Callable[[], float] = monotonic
+    now: Callable[[], datetime] = lambda: datetime.now().astimezone()
 
     def __post_init__(self) -> None:
         self._speaking = False
         self._answer_lock = asyncio.Lock()
         self._tasks: set[asyncio.Task[None]] = set()
+        self._armed_until = 0.0
+        self._armed_by = ""
 
     @property
     def speaking(self) -> bool:
@@ -130,16 +139,27 @@ class MeetingAgent:
         self.on_event(MeetingEvent("heard", text, speaker=speaker_label))
 
         wake_words = self.config.wake_words
-        if not addresses_agent(text, wake_words):
+        armed = self.clock() < self._armed_until and speaker_label == self._armed_by
+        if not addresses_agent(text, wake_words) and not armed:
             return
+        self._armed_until = 0.0
         if is_stop_command(text, wake_words):
             self.interrupt()
             self.on_event(MeetingEvent("status", "Stopped speaking on request."))
             return
         if speaker_label == PARTICIPANT and not self.config.respond_to_participants:
             return
+        if is_bare_wake(text, wake_words):
+            # "Scout." on its own: acknowledge and treat the next utterance as the question.
+            self._armed_until = self.clock() + _ARMED_SECONDS
+            self._armed_by = speaker_label
+            self._spawn(self._say("Yes?"))
+            return
         # Answer in the background so stop commands keep being heard while we talk.
-        task = asyncio.get_running_loop().create_task(self.respond(text, asker=speaker_label))
+        self._spawn(self.respond(text, asker=speaker_label))
+
+    def _spawn(self, operation) -> None:
+        task = asyncio.get_running_loop().create_task(operation)
         self._tasks.add(task)
         task.add_done_callback(self._task_finished)
 
@@ -217,8 +237,10 @@ class MeetingAgent:
             owner=self.config.owner_name,
         )
         who = self.config.owner_name if asker == ME else "a meeting participant"
+        moment = self.now().strftime("%A %d %B %Y, %H:%M %Z").strip()
         prompt = (
-            f"{instructions}\n<meeting_transcript>\n{self.transcript.render()}\n"
+            f"{instructions}Current local date and time: {moment}.\n"
+            f"<meeting_transcript>\n{self.transcript.render()}\n"
             f"</meeting_transcript>\nQuestion for you from {who}: {question}"
         )
         request = AssistantRequest(text=prompt)

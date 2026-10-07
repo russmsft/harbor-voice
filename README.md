@@ -7,7 +7,7 @@
 <p align="center">
   <img alt="Windows 10 and 11" src="https://img.shields.io/badge/Windows-10%20%7C%2011-38bdf8">
   <img alt="Python 3.11 and 3.12" src="https://img.shields.io/badge/Python-3.11%20%7C%203.12-818cf8">
-  <img alt="192 automated tests" src="https://img.shields.io/badge/tests-192%20passed-2dd4bf">
+  <img alt="210 automated tests" src="https://img.shields.io/badge/tests-210%20passed-2dd4bf">
   <a href="LICENSE"><img alt="MIT licence" src="https://img.shields.io/badge/license-MIT-fbbf24"></a>
 </p>
 
@@ -53,7 +53,9 @@ Harbor Voice is designed around the opposite priority:
 - Opt-in **meeting mode** for Teams. Harbor Voice listens to the meeting through speaker
   loopback and answers aloud through a virtual cable when someone says its name, or when you
   press `F10`. It introduces itself, answers only, never acts, and keeps the transcript in
-  memory only. See [docs/meeting-mode.md](docs/meeting-mode.md).
+  memory only. **Send Scout to a meeting** goes further and joins a Teams meeting as its own
+  "Scout (AI)" guest through Azure Communication Services, speaking with an Azure neural voice.
+  See [docs/meeting-mode.md](docs/meeting-mode.md).
 
 Harbor Voice deliberately does **not** implement always-listening audio outside explicit
 meeting mode, deletion,
@@ -220,6 +222,8 @@ normal app startup rather than partially applied.
 | `src/harbor_voice/coordinator.py` | Interruptible turn and approval state machine |
 | `src/harbor_voice/backends/` | GitHub Copilot CLI, faster-whisper, and SAPI adapters |
 | `src/harbor_voice/meeting/` | Teams meeting mode: loopback, virtual-cable bridge, agent |
+| `src/harbor_voice/meeting/acs/` | Scout (AI) Teams participant via ACS + Azure neural speech |
+| `web/acs-bridge/` | Headless participant page source (ACS Web Calling SDK) |
 | `src/harbor_voice/actions.py` | Typed Windows action executors |
 | `src/harbor_voice/ui/` | Tray, conversation, approval, and settings UI |
 | `src/harbor_voice/storage.py` | Settings, retention, and privacy-filtered logging |
@@ -236,7 +240,7 @@ approval reuse, storage privacy, UI behaviour, and installer semantics have dedi
 uv run pytest -q
 ```
 
-The current suite contains 192 tests. Hardware and authenticated GitHub Copilot conversation checks
+The current suite contains 210 tests. Hardware and authenticated GitHub Copilot conversation checks
 remain explicit manual smoke tests on the target Windows account.
 
 ## Roadmap
@@ -246,8 +250,7 @@ remain explicit manual smoke tests on the target Windows account.
 - Streaming response text and sentence-level speech.
 - Signed Windows release artifacts and an installer UI.
 - Optional wake word only if it can preserve the same visible privacy boundary.
-- Meeting mode phase 2: a separate "Scout (AI)" Teams participant via Azure Communication
-  Services and Azure AI Voice Live, with neural voices.
+- Per-speaker attribution and calendar-driven auto-join for the Scout (AI) participant.
 - Additional typed integrations without introducing a generic command runner.
 
 ## Contributing

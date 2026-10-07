@@ -45,6 +45,12 @@ class AssistantSettings(BaseModel):
     meeting_output_device: str = Field(default="CABLE Input", min_length=1)
     meeting_mic_passthrough: bool = True
     meeting_voice: str | None = None
+    meeting_display_name: str = Field(default="Scout (AI)", min_length=1)
+    meeting_acs_endpoint: str | None = None
+    meeting_speech_endpoint: str | None = None
+    meeting_neural_voice: str = Field(default="en-GB-SoniaNeural", min_length=1)
+    meeting_azure_tenant: str | None = None
+    meeting_show_browser: bool = False
 
     @field_validator("workspace")
     @classmethod

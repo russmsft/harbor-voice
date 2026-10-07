@@ -13,3 +13,5 @@ htmlcov/
 *.log
 models/
 recordings/
+node_modules/
+src/harbor_voice/meeting/acs/static/bridge.js

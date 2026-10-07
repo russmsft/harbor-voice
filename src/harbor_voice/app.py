@@ -10,11 +10,12 @@ from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 import qasync
 from platformdirs import user_data_path
 from PySide6.QtCore import QObject, Signal
-from PySide6.QtWidgets import QApplication, QDialog
+from PySide6.QtWidgets import QApplication, QDialog, QInputDialog
 
 from harbor_voice.actions import (
     ActionRouter,
@@ -31,7 +32,7 @@ from harbor_voice.backends.transcription import FasterWhisperTranscriber
 from harbor_voice.coordinator import TurnCoordinator
 from harbor_voice.domain import ActionKind, AppState
 from harbor_voice.meeting.agent import MeetingAwareBackend, MeetingConfig, MeetingEvent
-from harbor_voice.meeting.session import MeetingDevices, MeetingSession
+from harbor_voice.meeting.session import AzureMeetingOptions, MeetingDevices, MeetingSession
 from harbor_voice.policy import PermissionPolicy
 from harbor_voice.startup import StartupRegistration
 from harbor_voice.storage import (
@@ -160,6 +161,7 @@ def meeting_session_for(
     settings: AssistantSettings,
     providers: ProviderBundle,
     on_event,
+    meeting_link: str | None = None,
 ) -> MeetingSession:
     config = MeetingConfig(
         agent_name=settings.meeting_agent_name,
@@ -176,13 +178,29 @@ def meeting_session_for(
         mic_passthrough=settings.meeting_mic_passthrough,
         voice=settings.meeting_voice,
     )
+    azure = AzureMeetingOptions(
+        meeting_link=meeting_link,
+        display_name=settings.meeting_display_name,
+        acs_endpoint=settings.meeting_acs_endpoint,
+        speech_endpoint=settings.meeting_speech_endpoint,
+        neural_voice=settings.meeting_neural_voice,
+        tenant_id=settings.meeting_azure_tenant,
+        show_browser=settings.meeting_show_browser,
+    )
     return MeetingSession(
         backend=providers.backend,
         transcriber=providers.transcriber,
         config=config,
         devices=devices,
         on_event=on_event,
+        azure=azure,
     )
+
+
+def is_teams_meeting_link(text: str) -> bool:
+    parts = urlsplit(text.strip())
+    host = (parts.hostname or "").casefold()
+    return parts.scheme == "https" and host in {"teams.microsoft.com", "teams.live.com"}
 
 
 class HarborRuntime:
@@ -448,6 +466,7 @@ class HarborRuntime:
         self.tray.settings_requested.connect(self._show_settings)
         self.tray.new_conversation_requested.connect(self._new_conversation)
         self.tray.meeting_requested.connect(self._toggle_meeting)
+        self.tray.join_requested.connect(self._prompt_join)
         self.tray.answer_requested.connect(self._answer_latest)
         self._bridge.answer.connect(self._answer_latest)
         self.tray.quit_requested.connect(self._quit)
@@ -456,20 +475,47 @@ class HarborRuntime:
     def meeting_active(self) -> bool:
         return self._meeting is not None and self._meeting.active
 
-    def _toggle_meeting(self) -> asyncio.Task[None] | None:
+    def _toggle_meeting(self, meeting_link: str | None = None) -> asyncio.Task[None] | None:
         if self._closed:
             return None
         active = self._meeting_task
         if active is not None and not active.done():
             return active
-        operation = self._stop_meeting() if self._meeting is not None else self._start_meeting()
+        if self._meeting is not None:
+            operation = self._stop_meeting()
+        else:
+            operation = self._start_meeting(meeting_link)
         task = self._running_loop().create_task(operation)
         self._meeting_task = task
         task.add_done_callback(self._meeting_toggle_finished)
         return task
 
-    async def _start_meeting(self) -> None:
-        session = self._meeting_factory(self.settings, self.providers, self._meeting_event)
+    def _prompt_join(self) -> None:
+        if self._closed or self._meeting is not None:
+            return
+        clipboard = self.application.clipboard().text()
+        default = clipboard.strip() if is_teams_meeting_link(clipboard) else ""
+        link, accepted = QInputDialog.getText(
+            self.window,
+            "Send Scout to a meeting",
+            f"Teams meeting link. {self.settings.meeting_display_name} joins as a guest and "
+            "must be admitted from the lobby:",
+            text=default,
+        )
+        if not accepted:
+            return
+        if not is_teams_meeting_link(link):
+            self.tray.notify("Harbor Voice", "That doesn't look like a Teams meeting link.")
+            return
+        self._toggle_meeting(link.strip())
+
+    async def _start_meeting(self, meeting_link: str | None = None) -> None:
+        if meeting_link:
+            session = self._meeting_factory(
+                self.settings, self.providers, self._meeting_event, meeting_link
+            )
+        else:
+            session = self._meeting_factory(self.settings, self.providers, self._meeting_event)
         await session.start()
         self._meeting = session
         hotkey = self._hotkey_factory(
@@ -483,9 +529,9 @@ class HarborRuntime:
             self.tray.notify("Harbor Voice", f"Answer shortcut unavailable: {exc}")
         else:
             self._answer_hotkey = hotkey
-        self.tray.set_meeting_active(True)
+        self.tray.set_meeting_active(True, remote=bool(meeting_link))
         if self.logger is not None:
-            self.logger.info("meeting_mode=on")
+            self.logger.info("meeting_mode=on remote=%s", bool(meeting_link))
 
     async def _stop_meeting(self) -> None:
         session, self._meeting = self._meeting, None
@@ -527,6 +573,10 @@ class HarborRuntime:
             self.tray.notify("Harbor Voice meeting mode", event.text)
         elif event.kind == "error":
             self.window.set_error(event.text)
+        elif event.kind == "ended":
+            self.tray.notify("Harbor Voice meeting mode", event.text)
+            if self._meeting is not None:
+                self._toggle_meeting()
 
     def _show_window(self) -> None:
         self.window.show()

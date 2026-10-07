@@ -6,6 +6,8 @@ readme = "README.md"
 license = "MIT"
 requires-python = ">=3.11,<3.13"
 dependencies = [
+  "azure-communication-identity>=1.5",
+  "azure-identity>=1.19",
   "comtypes>=1.4; sys_platform == 'win32'",
   "faster-whisper",
   "numpy>=1.26",
@@ -17,6 +19,7 @@ dependencies = [
   "pyttsx3>=2.98",
   "qasync>=0.27",
   "sounddevice>=0.5",
+  "websockets>=14",
 ]
 
 [project.urls]
