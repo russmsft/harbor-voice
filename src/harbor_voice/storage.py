@@ -34,6 +34,17 @@ class AssistantSettings(BaseModel):
     retention: Retention = Retention.SESSION
     launch_at_login: bool = False
     registered_apps: dict[str, Path] = Field(default_factory=dict)
+    meeting_agent_name: str = Field(default="Scout", min_length=1)
+    meeting_owner_name: str = Field(default="my user", min_length=1)
+    meeting_wake_words: list[str] = Field(default_factory=lambda: ["scout"])
+    meeting_answer_key: str = Field(default="f10", min_length=1)
+    meeting_announce: bool = True
+    meeting_barge_in: bool = True
+    meeting_respond_to_participants: bool = True
+    meeting_loopback_device: str | None = None
+    meeting_output_device: str = Field(default="CABLE Input", min_length=1)
+    meeting_mic_passthrough: bool = True
+    meeting_voice: str | None = None
 
     @field_validator("workspace")
     @classmethod

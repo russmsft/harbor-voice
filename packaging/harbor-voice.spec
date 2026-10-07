@@ -11,6 +11,7 @@ for package in (
     "ctranslate2",
     "faster_whisper",
     "pyttsx3",
+    "pyaudiowpatch",
     "sounddevice",
 ):
     package_datas, package_binaries, package_hidden = collect_all(package)

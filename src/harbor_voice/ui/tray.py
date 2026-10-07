@@ -41,6 +41,8 @@ class TrayController(QObject):
     mute_requested = Signal()
     settings_requested = Signal()
     new_conversation_requested = Signal()
+    meeting_requested = Signal()
+    answer_requested = Signal()
     quit_requested = Signal()
 
     def __init__(self, parent: QObject | None = None) -> None:
@@ -52,15 +54,25 @@ class TrayController(QObject):
         self.settings_action = self.menu.addAction("Settings")
         self.new_action = self.menu.addAction("New conversation")
         self.menu.addSeparator()
+        self.meeting_action = self.menu.addAction("Start meeting mode")
+        self.answer_action = self.menu.addAction("Answer latest meeting question")
+        self.answer_action.setEnabled(False)
+        self.menu.addSeparator()
         self.quit_action = self.menu.addAction("Quit")
         self.icon.setContextMenu(self.menu)
         self.show_action.triggered.connect(self.show_requested.emit)
         self.mute_action.triggered.connect(self.mute_requested.emit)
         self.settings_action.triggered.connect(self.settings_requested.emit)
         self.new_action.triggered.connect(self.new_conversation_requested.emit)
+        self.meeting_action.triggered.connect(self.meeting_requested.emit)
+        self.answer_action.triggered.connect(self.answer_requested.emit)
         self.quit_action.triggered.connect(self.quit_requested.emit)
         self.icon.activated.connect(self._activated)
         self.set_state(AppState.IDLE)
+
+    def set_meeting_active(self, active: bool) -> None:
+        self.meeting_action.setText("Stop meeting mode" if active else "Start meeting mode")
+        self.answer_action.setEnabled(active)
 
     def show(self) -> None:
         self.icon.show()
