@@ -34,6 +34,8 @@ class AssistantSettings(BaseModel):
     retention: Retention = Retention.SESSION
     launch_at_login: bool = False
     registered_apps: dict[str, Path] = Field(default_factory=dict)
+    lookup_sources: list[Literal["msx", "msxi", "workiq"]] = Field(default_factory=list)
+    meeting_lookup_approval: bool = True
     meeting_agent_name: str = Field(default="Scout", min_length=1)
     meeting_owner_name: str = Field(default="my user", min_length=1)
     meeting_wake_words: list[str] = Field(default_factory=lambda: ["scout"])

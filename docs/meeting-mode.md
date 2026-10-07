@@ -90,6 +90,32 @@ npm run build   # writes src\harbor_voice\meeting\acs\static\bridge.js
 * Azure costs are pay-as-you-go: ACS Teams-interop VoIP minutes and neural TTS characters.
   Speech recognition stays local.
 
+## Looking things up (MSX, MSXi Snap, Microsoft 365)
+
+With `lookup_sources` set, Scout can answer from your work data in both meeting modes, and
+in private F9 turns. Each source is a local MCP server you already use, attached to the
+Copilot CLI session with an explicit **read-only** tool allow-list:
+
+| Source | Server | Tools offered |
+|---|---|---|
+| `msx` | MSX-IQ MCP (`~/.copilot/cache/MSX-IQ/mcp/msx`) | CRM query/get, opportunities, milestones, account team, territory (no create/update/close/execute) |
+| `msxi` | MSXi Snap `mcp` | Account overview, ACR, MACC, NNR, milestones, UAT, factory (no earnings or MINT) |
+| `workiq` | WorkIQ `mcp` | `ask` and `retrieve` only (no send, create, update or delete) |
+
+**Disclosure gate.** When an answer used any lookup tool, Scout says "Let me check on that",
+then shows you the exact answer on screen and **doesn't speak it until you approve**.
+Press **Speak** or `F10`, or **Don't speak**. If you decline, or don't respond within two
+minutes, Scout says it will leave that one for you to follow up. General-knowledge answers
+aren't gated.
+
+| Setting | Default | Purpose |
+|---|---|---|
+| `lookup_sources` | `[]` | Any of `"msx"`, `"msxi"`, `"workiq"` |
+| `meeting_lookup_approval` | `true` | Require your approval before speaking looked-up answers |
+
+Lookups add latency: MSX and MSXi Snap take roughly 5–10 seconds, and WorkIQ about
+20–30 seconds.
+
 ---
 
 ## Meeting mode (local)
@@ -188,6 +214,4 @@ Edit these in `%LOCALAPPDATA%\HarborVoice\HarborVoice\settings.json`.
 * Speaker attribution is only "Participant" or "Me". Loopback mixes all remote voices.
 * Windows SAPI voices sound robotic. Neural voices are planned for the Azure phase.
 * Latency is roughly 1–2 seconds for transcription plus 2–4 seconds for reasoning.
-* Answers can only draw on the meeting transcript, the model's knowledge, and read-only
-  files in the selected workspace. Microsoft 365, MSX, or vault lookups need Copilot CLI
-  tools that are disabled by default.
+* Work-data lookups are opt-in through `lookup_sources`; see "Looking things up" above.

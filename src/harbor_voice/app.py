@@ -14,8 +14,8 @@ from urllib.parse import urlsplit
 
 import qasync
 from platformdirs import user_data_path
-from PySide6.QtCore import QObject, Signal
-from PySide6.QtWidgets import QApplication, QDialog, QInputDialog
+from PySide6.QtCore import QObject, Qt, Signal
+from PySide6.QtWidgets import QApplication, QDialog, QInputDialog, QMessageBox
 
 from harbor_voice.actions import (
     ActionRouter,
@@ -27,6 +27,7 @@ from harbor_voice.actions import (
 from harbor_voice.audio.capture import MemoryRecorder
 from harbor_voice.audio.hotkey import GlobalHoldKey
 from harbor_voice.backends.copilot import CopilotCliBackend
+from harbor_voice.backends.lookups import LookupConfig
 from harbor_voice.backends.speech import SapiSpeaker
 from harbor_voice.backends.transcription import FasterWhisperTranscriber
 from harbor_voice.coordinator import TurnCoordinator
@@ -127,7 +128,12 @@ def default_providers(
     *,
     copilot_home: Path,
 ) -> ProviderBundle:
-    backend = MeetingAwareBackend(CopilotCliBackend(copilot_home=copilot_home))
+    backend = MeetingAwareBackend(
+        CopilotCliBackend(
+            copilot_home=copilot_home,
+            lookups=LookupConfig.from_names(settings.lookup_sources),
+        )
+    )
     clipboard = ClipboardExecutor(QtClipboard(application))
     runner = ActionRouter(
         {
@@ -170,6 +176,7 @@ def meeting_session_for(
         announce=settings.meeting_announce,
         barge_in=settings.meeting_barge_in,
         respond_to_participants=settings.meeting_respond_to_participants,
+        lookup_approval=settings.meeting_lookup_approval,
     )
     devices = MeetingDevices(
         loopback_device=settings.meeting_loopback_device,
@@ -250,6 +257,7 @@ class HarborRuntime:
         self._meeting: MeetingSession | None = None
         self._meeting_task: asyncio.Task[None] | None = None
         self._answer_hotkey = None
+        self._disclosure_box: QMessageBox | None = None
         self._approval_dialog: ApprovalDialog | None = None
         self._operation_task: asyncio.Task[None] | None = None
         self._shutdown_task: asyncio.Task[None] | None = None
@@ -535,6 +543,7 @@ class HarborRuntime:
 
     async def _stop_meeting(self) -> None:
         session, self._meeting = self._meeting, None
+        self._close_disclosure()
         hotkey, self._answer_hotkey = self._answer_hotkey, None
         if hotkey is not None:
             with suppress(Exception):
@@ -560,7 +569,46 @@ class HarborRuntime:
         session = self._meeting
         if self._closed or session is None or not session.active:
             return None
+        if session.awaiting_approval:
+            self._resolve_disclosure(True)
+            return None
         return self._running_loop().create_task(session.answer_latest())
+
+    def _show_disclosure(self, event: MeetingEvent) -> None:
+        self._close_disclosure()
+        box = QMessageBox(self.window)
+        box.setWindowTitle("Scout wants to say this in the meeting")
+        box.setIcon(QMessageBox.Icon.Question)
+        box.setText(f"Question: {event.question}\n\nAnswer from your work data:\n{event.text}")
+        box.setInformativeText(
+            f"Press Speak (or {self.settings.meeting_answer_key.upper()}) to say it aloud."
+        )
+        speak = box.addButton("Speak", QMessageBox.ButtonRole.AcceptRole)
+        box.addButton("Don't speak", QMessageBox.ButtonRole.RejectRole)
+        box.setWindowModality(Qt.WindowModality.NonModal)
+        box.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, True)
+        box.buttonClicked.connect(
+            lambda button: self._resolve_disclosure(button is speak, from_dialog=True)
+        )
+        self._disclosure_box = box
+        box.show()
+        box.raise_()
+        self.tray.notify("Scout needs your OK", "Review the answer before it's spoken.")
+
+    def _resolve_disclosure(self, approved: bool, *, from_dialog: bool = False) -> None:
+        session = self._meeting
+        if session is not None:
+            session.resolve_approval(approved)
+        if not from_dialog:
+            self._close_disclosure()
+        else:
+            self._disclosure_box = None
+
+    def _close_disclosure(self) -> None:
+        box, self._disclosure_box = self._disclosure_box, None
+        if box is not None:
+            box.blockSignals(True)
+            box.close()
 
     def _meeting_event(self, event: MeetingEvent) -> None:
         if self.logger is not None:
@@ -577,6 +625,8 @@ class HarborRuntime:
             self.tray.notify("Harbor Voice meeting mode", event.text)
             if self._meeting is not None:
                 self._toggle_meeting()
+        elif event.kind == "approval":
+            self._show_disclosure(event)
 
     def _show_window(self) -> None:
         self.window.show()

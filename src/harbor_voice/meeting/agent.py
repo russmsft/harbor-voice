@@ -41,6 +41,10 @@ Rules:
   commitments, and never commit {owner} or Microsoft to anything.
 - Do not reveal private, confidential, or personal information from files unless {owner}
   explicitly asks you to.
+- If lookup tools are available, you may use them for questions about {owner}'s accounts,
+  pipeline, meetings, or documents. {owner} reviews any answer based on them before it is
+  spoken, but still share only what the question needs: no email contents, personal data,
+  or internal figures nobody asked for.
 """
 
 PRIVATE_CONTEXT = """The user is in a live meeting. The untrusted, automatically transcribed
@@ -60,6 +64,8 @@ class MeetingConfig:
     announce: bool = True
     barge_in: bool = True
     respond_to_participants: bool = True
+    lookup_approval: bool = True
+    approval_timeout: float = 120.0
 
     @property
     def announcement(self) -> str:
@@ -73,10 +79,16 @@ class MeetingConfig:
 
 @dataclass(frozen=True, slots=True)
 class MeetingEvent:
-    kind: Literal["heard", "question", "answer", "status", "error", "ended"]
+    kind: Literal["heard", "question", "answer", "status", "error", "ended", "approval"]
     text: str
     speaker: str = ""
     question: str = ""
+
+
+@dataclass(frozen=True, slots=True)
+class LookupResult:
+    response: AssistantResponse
+    tool_calls: tuple[str, ...]
 
 
 class MeetingAwareBackend:
@@ -97,8 +109,34 @@ class MeetingAwareBackend:
         return await self.ask_raw(request)
 
     async def ask_raw(self, request: AssistantRequest) -> AssistantResponse:
+        return (await self.ask_tracked(request)).response
+
+    async def ask_tracked(
+        self,
+        request: AssistantRequest,
+        on_tool_call: Callable[[str], None] | None = None,
+    ) -> LookupResult:
+        """Ask while recording which lookup tools the model used for this turn only."""
         async with self._lock:
-            return await self._inner.ask(request)
+            supports_tools = hasattr(self._inner, "tool_listener")
+            lookup_tools = getattr(self._inner, "lookup_tools", None)
+
+            def listener(title: str) -> None:
+                if on_tool_call is not None and (lookup_tools is None or title in lookup_tools):
+                    on_tool_call(title)
+
+            if supports_tools:
+                self._inner.tool_listener = listener
+            try:
+                response = await self._inner.ask(request)
+            finally:
+                if supports_tools:
+                    self._inner.tool_listener = None
+            tools = tuple(getattr(self._inner, "last_tool_calls", ()) or ())
+            if lookup_tools is not None:
+                # Built-in helpers such as tool search don't touch work data.
+                tools = tuple(tool for tool in tools if tool in lookup_tools)
+            return LookupResult(response, tools)
 
     def __getattr__(self, name: str) -> Any:
         return getattr(self._inner, name)
@@ -121,6 +159,8 @@ class MeetingAgent:
         self._tasks: set[asyncio.Task[None]] = set()
         self._armed_until = 0.0
         self._armed_by = ""
+        self._approval: asyncio.Future[bool] | None = None
+        self._checking: asyncio.Task[None] | None = None
 
     @property
     def speaking(self) -> bool:
@@ -200,21 +240,69 @@ class MeetingAgent:
             shown = display_question or question
             self.on_event(MeetingEvent("question", shown, speaker=asker))
             try:
-                response = await self._ask(question, asker)
+                result = await self._ask(question, asker)
             except Exception as exc:
+                await self._finish_holding_phrase()
                 self.on_event(MeetingEvent("error", f"Couldn't answer: {exc}"))
                 await self._say(
                     f"Sorry, I couldn't get an answer just now. {self.config.owner_name} "
                     "will follow up."
                 )
                 return
-            if isinstance(response, MessageResponse):
-                answer = response.message.strip()
+            await self._finish_holding_phrase()
+            if isinstance(result.response, MessageResponse):
+                answer = result.response.message.strip()
             else:
                 answer = NO_ACTIONS_IN_MEETINGS.format(owner=self.config.owner_name)
+            # Work data never reaches the room without the owner's explicit OK.
+            needs_review = bool(result.tool_calls) and self.config.lookup_approval
+            if needs_review and not await self._approve(answer, shown):
+                self.transcript.add(self.config.agent_name, "[answer withheld]")
+                await self._say(
+                    f"I'll leave that one for {self.config.owner_name} to follow up on."
+                )
+                return
             self.transcript.add(self.config.agent_name, answer)
             self.on_event(MeetingEvent("answer", answer, question=shown))
             await self._say(answer)
+
+    @property
+    def awaiting_approval(self) -> bool:
+        return self._approval is not None and not self._approval.done()
+
+    def resolve_approval(self, approved: bool) -> bool:
+        pending = self._approval
+        if pending is None or pending.done():
+            return False
+        pending.set_result(approved)
+        return True
+
+    async def _approve(self, answer: str, question: str) -> bool:
+        self._approval = asyncio.get_running_loop().create_future()
+        self.on_event(MeetingEvent("approval", answer, question=question))
+        try:
+            return await asyncio.wait_for(
+                asyncio.shield(self._approval), self.config.approval_timeout
+            )
+        except TimeoutError:
+            self.on_event(MeetingEvent("status", "Answer not approved in time; withheld."))
+            return False
+        finally:
+            self._approval = None
+
+    def _on_tool_call(self, title: str) -> None:
+        del title
+        if self._checking is not None:
+            return
+        self.on_event(MeetingEvent("status", "Looking that up…"))
+        self._checking = asyncio.get_running_loop().create_task(self._say("Let me check on that."))
+        self._tasks.add(self._checking)
+        self._checking.add_done_callback(self._task_finished)
+
+    async def _finish_holding_phrase(self) -> None:
+        checking, self._checking = self._checking, None
+        if checking is not None:
+            await asyncio.gather(checking, return_exceptions=True)
 
     def interrupt(self) -> None:
         self.speaker.cancel()
@@ -231,7 +319,7 @@ class MeetingAgent:
     def clear(self) -> None:
         self.transcript.clear()
 
-    async def _ask(self, question: str, asker: str) -> AssistantResponse:
+    async def _ask(self, question: str, asker: str) -> LookupResult:
         instructions = MEETING_INSTRUCTIONS.format(
             agent=self.config.agent_name,
             owner=self.config.owner_name,
@@ -244,10 +332,11 @@ class MeetingAgent:
             f"</meeting_transcript>\nQuestion for you from {who}: {question}"
         )
         request = AssistantRequest(text=prompt)
-        ask_raw = getattr(self.backend, "ask_raw", None)
-        if callable(ask_raw):
-            return await ask_raw(request)
-        return await self.backend.ask(request)
+        self._checking = None
+        ask_tracked = getattr(self.backend, "ask_tracked", None)
+        if callable(ask_tracked):
+            return await ask_tracked(request, on_tool_call=self._on_tool_call)
+        return LookupResult(await self.backend.ask(request), ())
 
     async def _say(self, text: str) -> None:
         self._speaking = True

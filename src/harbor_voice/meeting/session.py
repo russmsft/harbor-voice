@@ -158,6 +158,13 @@ class MeetingSession:
         if self.agent is not None and self.active:
             await self.agent.answer_latest()
 
+    @property
+    def awaiting_approval(self) -> bool:
+        return self.agent is not None and self.agent.awaiting_approval
+
+    def resolve_approval(self, approved: bool) -> bool:
+        return self.agent is not None and self.agent.resolve_approval(approved)
+
     def interrupt(self) -> None:
         if self.agent is not None:
             self.agent.interrupt()

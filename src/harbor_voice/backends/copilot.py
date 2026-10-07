@@ -17,6 +17,7 @@ from typing import Any, Protocol
 
 from pydantic import TypeAdapter, ValidationError
 
+from harbor_voice.backends.lookups import LookupConfig
 from harbor_voice.domain import (
     ActionKind,
     ActionProposal,
@@ -43,6 +44,8 @@ ASSISTANT_RESPONSE_SCHEMA = TypeAdapter(AssistantResponse).json_schema()
 _SAFE_PARSE_FAILURE = "I couldn't safely interpret that response, so I took no action."
 _MAX_HISTORY_ITEMS = 12
 _MAX_HISTORY_CHARS = 12_000
+# ACP prompts can exceed the 4 KiB default pipe buffer; a larger buffer avoids stalls.
+_PIPE_BUFFER_BYTES = 1 << 20
 
 
 @dataclass(frozen=True, slots=True)
@@ -405,7 +408,7 @@ class _WindowsProcess:
             ctypes.byref(read),
             ctypes.byref(write),
             ctypes.byref(security),
-            0,
+            _PIPE_BUFFER_BYTES,
         ):
             raise ctypes.WinError(ctypes.get_last_error())
         if not self._kernel32.SetHandleInformation(
@@ -425,7 +428,7 @@ class _WindowsProcess:
             ctypes.byref(read),
             ctypes.byref(write),
             ctypes.byref(security),
-            0,
+            _PIPE_BUFFER_BYTES,
         ):
             raise ctypes.WinError(ctypes.get_last_error())
         if not self._kernel32.SetHandleInformation(
@@ -673,6 +676,7 @@ class CopilotAcpConnection:
         self._request_lock = asyncio.Lock()
         self._write_lock = asyncio.Lock()
         self._next_request_id = 0
+        self.tool_call_listener: Callable[[str], None] | None = None
 
     async def start(self) -> None:
         if self._process is not None:
@@ -726,6 +730,11 @@ class CopilotAcpConnection:
             if not isinstance(update, dict):
                 return
             update_type = update.get("sessionUpdate")
+            if update_type == "tool_call":
+                listener = self.tool_call_listener
+                if listener is not None:
+                    title = update.get("title")
+                    listener(title if isinstance(title, str) else "tool")
             if update_type != "agent_message_chunk":
                 if update_type in {
                     "agent_thought_chunk",
@@ -928,6 +937,7 @@ class CopilotCliBackend:
         connection_factory: AcpConnectionFactory = CopilotAcpConnection,
         timeout_seconds: float = 180.0,
         startup_timeout_seconds: float = 30.0,
+        lookups: LookupConfig | None = None,
     ) -> None:
         self._configured_executable = executable
         self._copilot_home = copilot_home.expanduser().resolve(strict=False)
@@ -935,11 +945,14 @@ class CopilotCliBackend:
         self._connection_factory = connection_factory
         self._timeout_seconds = timeout_seconds
         self._startup_timeout_seconds = startup_timeout_seconds
+        self._lookups = lookups if lookups else None
         self._connection: AcpConnection | None = None
         self._session_id: str | None = None
         self._primed = False
         self._history: list[tuple[str, str]] = []
         self.workspace: Path | None = None
+        self.last_tool_calls: list[str] = []
+        self.tool_listener: Callable[[str], None] | None = None
 
     async def start(self, workspace: Path) -> None:
         resolved = workspace.expanduser().resolve(strict=False)
@@ -989,11 +1002,13 @@ class CopilotCliBackend:
 
     async def ask(self, request: AssistantRequest) -> AssistantResponse:
         raw = ""
+        self.last_tool_calls = []
         for attempt in range(2):
             await self._ensure_connection()
             prompt = self._build_prompt(request.text)
             connection = self._require_connection()
             session_id = self._require_session_id()
+            connection.tool_call_listener = self._record_tool_call
             prompt_task = asyncio.create_task(connection.prompt(session_id, prompt))
             try:
                 raw = await asyncio.wait_for(
@@ -1025,6 +1040,16 @@ class CopilotCliBackend:
         )
         self._trim_history()
         return response
+
+    @property
+    def lookup_tools(self) -> frozenset[str]:
+        return frozenset(self._lookups.available_tools()) if self._lookups else frozenset()
+
+    def _record_tool_call(self, title: str) -> None:
+        self.last_tool_calls.append(title)
+        listener = self.tool_listener
+        if listener is not None:
+            listener(title)
 
     async def apply_workspace_change(self, action: ActionProposal) -> ActionResult:
         if action.kind is not ActionKind.FILE_WRITE:
@@ -1105,6 +1130,17 @@ class CopilotCliBackend:
         executable = self._executable
         if executable is None:
             raise RuntimeError("GitHub Copilot CLI backend is not started")
+        tools = ["view", "grep", "glob"]
+        allowed = ["view", "grep", "glob"]
+        lookup_arguments: list[str] = []
+        if self._lookups:
+            config_path = self._copilot_home / "harbor-lookups.json"
+            config_path.write_text(
+                json.dumps(self._lookups.mcp_config(), indent=2), encoding="utf-8", newline="\n"
+            )
+            lookup_arguments = ["--additional-mcp-config", f"@{config_path}"]
+            tools += self._lookups.available_tools()
+            allowed += self._lookups.allowed_tools()
         return [
             executable,
             "--acp",
@@ -1116,15 +1152,16 @@ class CopilotCliBackend:
             "--no-remote",
             "--no-remote-export",
             "--disable-builtin-mcps",
+            *lookup_arguments,
             "--disallow-temp-dir",
             "--effort",
             "low",
             "--log-level",
             "none",
             "--available-tools",
-            "view,grep,glob",
+            ",".join(tools),
             "--allow-tool",
-            "view,grep,glob",
+            ",".join(allowed),
         ]
 
     def _build_prompt(self, request: str) -> str:
@@ -1138,8 +1175,9 @@ class CopilotCliBackend:
             [{"role": role, "content": text} for role, text in self._history],
             separators=(",", ":"),
         )
+        lookups = self._lookups.instructions() if self._lookups else ""
         return (
-            f"{VOICE_INSTRUCTIONS}\nJSON schema:\n{schema}\n"
+            f"{VOICE_INSTRUCTIONS}{lookups}\nJSON schema:\n{schema}\n"
             f"Prior conversation JSON:\n{history}\n"
             f"Current user request:\n{request}"
         )
