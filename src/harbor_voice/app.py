@@ -128,10 +128,13 @@ def default_providers(
     *,
     copilot_home: Path,
 ) -> ProviderBundle:
+    lookups = LookupConfig.from_names(settings.lookup_sources)
     backend = MeetingAwareBackend(
         CopilotCliBackend(
             copilot_home=copilot_home,
-            lookups=LookupConfig.from_names(settings.lookup_sources),
+            lookups=lookups,
+            # Lookup MCP servers (MSX, MSXi Snap, WorkIQ) can take 30 s+ to start cold.
+            startup_timeout_seconds=120.0 if lookups else 30.0,
         )
     )
     clipboard = ClipboardExecutor(QtClipboard(application))
